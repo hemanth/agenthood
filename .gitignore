@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.agents/
+*.db
+*.log
+
+# secrets -- never commit
+mcp_config.json
