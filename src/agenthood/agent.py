@@ -532,7 +532,27 @@ class AgentHood:
                       "good afternoon", "good evening", "whats up", "what's up"}:
             return "Hey. Ask me about any stock, or use `.analyze TICKER` for a full report."
 
+        # Vague trading questions without a ticker -- guide the user
+        vague_patterns = [
+            r"(stock|what).*(recommend|suggestion|pick|buy|invest)",
+            r"(which|what) (one|stock|should).*(buy|sell|trade|invest|pick)",
+            r"(give|suggest|find|show).*(stock|trade|buy|pick|play)",
+            r"what (to|should i) (buy|sell|trade|invest)",
+            r"(any|some|good) (stock|trade|play|pick|idea)",
+        ]
+        if any(_re.search(p, lower) for p in vague_patterns):
+            return (
+                "I need a ticker to work with. Try:\n\n"
+                "| Example | What it does |\n"
+                "|---|---|\n"
+                "| `.analyze NVDA` | Full analysis with verdict |\n"
+                "| `how's AAPL doing?` | Quick price + technicals |\n"
+                "| `.portfolio` | See your current positions |\n\n"
+                "Give me a ticker and I'll tell you if it's a buy, sell, or hold."
+            )
+
         return None
+
     # -- Chat ------------------------------------------------------------------
 
     async def chat(
@@ -586,19 +606,6 @@ class AgentHood:
         # Step 2: call the LLM with full tool access
         if _progress:
             _progress("thinking...")
-
-        # Inject conversation history so the LLM can handle follow-ups
-        # like "which one to buy?" that reference prior turns.
-        if self._history:
-            ctx_lines = []
-            for role, text in self._history[-20:]:
-                label = "User" if role == "user" else "Assistant"
-                # Truncate long responses to keep context lean
-                snippet = text[:800] + "..." if len(text) > 800 else text
-                ctx_lines.append(f"{label}: {snippet}")
-            self._agent.set_context(
-                "Previous conversation:\n" + "\n".join(ctx_lines)
-            )
 
         result = await self._agent.infer(
             prompt, output_type=output_schema, **kwargs
