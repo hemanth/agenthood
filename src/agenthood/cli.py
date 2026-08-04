@@ -28,12 +28,33 @@ from agenthood import AgentHood, load_config
 from agenthood.setup import run_setup
 
 
-def parse_args() -> argparse.Namespace:
+KNOWN_SUBCOMMANDS = {"setup", "serve", "eval", "watch", "watches", "analyze", "daemon"}
+
+
+def _add_common_options(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--config", default=None, help="Path to config file (default: ~/.agenthood/config.json)")
+    p.add_argument("--model",  default=None, help="LLM model override (e.g. gpt-4o)")
+    p.add_argument("--live",   action="store_true", help="Enable live trading (disables dry_run)")
+    p.add_argument("--codemode", action="store_true", help="LLM writes Python to call tools")
+    p.add_argument("--stream", action="store_true", help="Stream response tokens as they arrive")
+    p.add_argument("--ralph",  metavar="PROMPT.md", help="Run autonomous loop until all checkpoints done")
+    p.add_argument("--inbox",  metavar="DIR",       help="Watch directory for signal files")
+    p.add_argument("--permissions", choices=["auto", "ask-writes", "plan"],
+                   default=None, help="Tool permission mode")
+    p.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
+    p.add_argument("--plain",   action="store_true", help="Disable TUI -- use plain text output")
+    p.add_argument("--session", metavar="NAME",       help="Continue named session (preserves context)")
+    p.add_argument("--new-session", metavar="NAME",   help="Start a fresh named session")
+    p.add_argument("--sessions", action="store_true", help="List saved sessions and exit")
+
+
+def _build_command_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="agenthood",
         description="AgentHood -- Robinhood trading agent powered by agentu",
     )
-    sub = p.add_subparsers(dest="command")
+    _add_common_options(p)
+    sub = p.add_subparsers(dest="command", required=True)
 
     # setup subcommand
     sub.add_parser("setup", help="Interactive first-run setup wizard")
@@ -71,27 +92,38 @@ def parse_args() -> argparse.Namespace:
     d_cmd = sub.add_parser("daemon", help="Manage the AgentHood watcher daemon.")
     d_cmd.add_argument("action", choices=["start", "stop", "status", "logs"])
 
-    # default (chat) mode -- no subcommand needed
-    p.add_argument("--config", default=None, help="Path to config file (default: ~/.agenthood/config.json)")
-    p.add_argument("--model",  default=None, help="LLM model override (e.g. gpt-4o)")
-    p.add_argument("--live",   action="store_true", help="Enable live trading (disables dry_run)")
-    p.add_argument("--codemode", action="store_true", help="LLM writes Python to call tools")
-    p.add_argument("--stream", action="store_true", help="Stream response tokens as they arrive")
-    p.add_argument("--ralph",  metavar="PROMPT.md", help="Run autonomous loop until all checkpoints done")
-    p.add_argument("--inbox",  metavar="DIR",       help="Watch directory for signal files")
-    p.add_argument("--permissions", choices=["auto", "ask-writes", "plan"],
-                   default=None, help="Tool permission mode")
-    p.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
-    p.add_argument("--plain",   action="store_true", help="Disable TUI -- use plain text output")
-    p.add_argument("--session", metavar="NAME",       help="Continue named session (preserves context)")
-    p.add_argument("--new-session", metavar="NAME",   help="Start a fresh named session")
-    p.add_argument("--sessions", action="store_true", help="List saved sessions and exit")
+    return p
+
+
+def _build_prompt_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="agenthood",
+        description="AgentHood -- Robinhood trading agent powered by agentu",
+    )
+    _add_common_options(p)
     p.add_argument(
         "prompt",
         nargs="*",
         help="One-shot prompt. If omitted, starts interactive REPL.",
     )
-    return p.parse_args()
+    return p
+
+
+def parse_args() -> argparse.Namespace:
+    # argparse can't cleanly mix an optional subparsers action with a trailing
+    # positional -- it eagerly validates the first positional token against the
+    # subcommand choices and errors out even when no subcommand was intended.
+    # Work around it by pre-scanning argv and picking the right parser tree.
+    argv = sys.argv[1:]
+    first_positional = next((a for a in argv if not a.startswith("-")), None)
+
+    if first_positional in KNOWN_SUBCOMMANDS:
+        args = _build_command_parser().parse_args(argv)
+        args.prompt = []
+    else:
+        args = _build_prompt_parser().parse_args(argv)
+        args.command = None
+    return args
 
 
 # ── Plain fallback REPL (--plain or non-TTY) ─────────────────────────────────
@@ -122,6 +154,33 @@ async def plain_repl(agent: AgentHood) -> None:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def _ensure_auth(cfg) -> bool:
+    """Prompt to authenticate with Robinhood if no token is cached.
+
+    Without this, AgentHood.start() fails deep inside MCP tool-loading with a
+    raw 401 traceback -- catch it here instead and offer to run the OAuth flow.
+    Returns False if the caller should abort (no token, user declined).
+    """
+    if cfg.mcp_token:
+        return True
+    print("\n⚠️  No Robinhood auth token found -- trading tools can't load.")
+    try:
+        choice = input("Authenticate with Robinhood now? (y/n) [y]: ").strip().lower() or "y"
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if choice != "y":
+        print("Skipped. Run 'agenthood setup' anytime to authenticate.")
+        return False
+    from .setup import setup_robinhood_auth
+    token = setup_robinhood_auth()
+    if not token:
+        print("Auth did not complete.")
+        return False
+    cfg.mcp_token = token
+    return True
+
+
 async def main() -> None:
     args = parse_args()
 
@@ -148,6 +207,8 @@ async def main() -> None:
 
     # ── serve subcommand ───────────────────────────────────────────────────────
     if args.command == "serve":
+        if not _ensure_auth(cfg):
+            return
         host = getattr(args, "host", "0.0.0.0")
         port = getattr(args, "port", 8000)
         async with AgentHood(cfg) as agent:
@@ -172,6 +233,8 @@ async def main() -> None:
             ]
 
         print(f"Running {len(test_cases)} evaluation cases...")
+        if not _ensure_auth(cfg):
+            return
         async with AgentHood(cfg) as agent:
             results = await agent.evaluate(test_cases, use_llm_judge=llm_judge)
         print(f"Passed   : {results.get('passed','?')}/{results.get('total','?')}")
@@ -192,6 +255,8 @@ async def main() -> None:
     if args.command == "analyze":
         tickers = [t.upper() for t in args.tickers]
         print(f"Analyzing {', '.join(tickers)}...\n")
+        if not _ensure_auth(cfg):
+            return
         async with AgentHood(cfg) as agent:
             for ticker in tickers:
                 result = await agent.analyze(ticker)
@@ -266,6 +331,8 @@ async def main() -> None:
         return
 
     # ── Interactive / one-shot ─────────────────────────────────────────────────
+    if not _ensure_auth(cfg):
+        return
     async with AgentHood(cfg) as agent:
 
         # Ralph autonomous loop

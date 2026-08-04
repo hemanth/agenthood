@@ -290,6 +290,15 @@ def run_setup(config_path: str | None = None) -> None:
     Path(config_path).write_text(json.dumps(save_cfg, indent=2))
 
     _print(f"\n  ✅ Saved {config_path}", "green")
+
+    if not token:
+        _print("\n── Not ready yet ─────────────────────────────────────", "bold")
+        _print("  ⚠️  No Robinhood auth token -- trading tools won't load.", "yellow")
+        _print("  Run 'agenthood setup' again, or 'agenthood' will offer to", "dim")
+        _print("  authenticate the next time you start it.", "dim")
+        print()
+        return
+
     _print("\n── You're ready! ─────────────────────────────────────", "bold")
     _print("  Start the agent:", "dim")
     _print("    agenthood", "cyan")
