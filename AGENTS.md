@@ -20,9 +20,10 @@ of equities, options, technical analysis, and portfolio risk management.
 ### Dispatch pipeline (order matters)
 `_direct_dispatch` in agent.py processes user input in this order:
 1. **Watch/alert detection** -- regex match, returns `__watch__` sentinel
-2. **Meta questions** -- "what can you do?", "hello", etc. Returns canned string (no LLM)
-3. **Stock query detection** -- natural language ("how's PYPL doing?") or bare tickers ("pypl, google, meta"). Returns `__analyze__` sentinel
-4. **Fallthrough** -- returns None, goes to LLM via `agent.infer()`
+2. **Everything else** -- goes to LLM via `agent.infer()` with search_tools()
+
+The LLM handles all intent parsing: greetings, stock queries, recommendations,
+meta questions, ticker resolution, company name lookup. No hardcoded NL patterns.
 
 ### TUI command dispatch (handle_meta in tui.py)
 Dot commands are handled BEFORE the agent's dispatch pipeline:
@@ -33,7 +34,7 @@ Dot commands are handled BEFORE the agent's dispatch pipeline:
 - `.model`, `.cost`, `.memory`, `.tools`, `.verbose` -- handled inline, returns True
 
 ### Provider config
-- **Chat model**: `model` field in agenthood.json (OpenRouter free tier)
+- **Chat model**: `model` field in ~/.agenthood/config.json (OpenRouter free tier)
 - **Analyze model**: separate `analyze_model`, `analyze_api_base`, `analyze_api_key` fields
 - Groq is the fast path for `.analyze` (~1s vs ~14s on free tier)
 - The status bar shows both: `model gemma-4-26b | analyze llama-3.3-70b (groq) LIVE`
@@ -44,12 +45,6 @@ Dot commands are handled BEFORE the agent's dispatch pipeline:
 - Accounts response shape: `data.accounts[]` (NOT `data.results[]`)
 - Quotes use `symbols: [TICKER]` param
 - Technical indicators require `type`, `interval`, `start_time` params
-
-### Ticker resolution
-- `_NAME_TO_TICKER` in tui.py and `_NAMES` in agent.py map company names to symbols
-- Bare ticker lists (e.g. "pypl, google, meta") are detected when ALL words are known names/tickers
-- Unknown tickers are uppercase 1-5 letter words; stopwords are filtered out
-- Fallback: Robinhood search MCP tool for unrecognized company names
 
 ## Reasoning style
 - Think step-by-step before making tool calls.

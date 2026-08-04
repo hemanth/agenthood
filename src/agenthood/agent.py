@@ -400,157 +400,15 @@ class AgentHood:
         self._account_number = acct
         return acct
 
-    # -- Watch detection (the only deterministic dispatch left) -----------------
-
     async def _direct_dispatch(self, user_input: str) -> dict | None:
-        """Check for watch/alert prompts or stock analysis queries.
+        """Check for watch/alert prompts (structural, not intent-based).
 
-        Returns __watch__ sentinel, __analyze__ sentinel, or None.
+        Everything else goes to the LLM via infer().
         """
-        import re as _re
         from agenthood.watcher import parse_watch_prompt
         watch_spec = parse_watch_prompt(user_input.strip())
         if watch_spec:
             return {"__watch__": watch_spec}
-
-        # Handle common meta-questions without hitting the LLM
-        meta = self._handle_meta_question(user_input)
-        if meta:
-            return meta
-
-        # Detect natural-language stock queries and route to analyze()
-        tickers = self._extract_stock_query(user_input)
-        if tickers:
-            return {"__analyze__": tickers}
-
-        return None
-
-    # Common company name -> ticker
-    _NAMES: dict[str, str] = {
-        "APPLE": "AAPL", "GOOGLE": "GOOGL", "ALPHABET": "GOOGL",
-        "MICROSOFT": "MSFT", "AMAZON": "AMZN", "META": "META",
-        "FACEBOOK": "META", "TESLA": "TSLA", "NVIDIA": "NVDA",
-        "NETFLIX": "NFLX", "PAYPAL": "PYPL", "AMD": "AMD",
-        "INTEL": "INTC", "DISNEY": "DIS", "WALMART": "WMT",
-        "JPMORGAN": "JPM", "VISA": "V", "MASTERCARD": "MA",
-        "SALESFORCE": "CRM", "UBER": "UBER", "SPOTIFY": "SPOT",
-        "AIRBNB": "ABNB", "COINBASE": "COIN", "ROBINHOOD": "HOOD",
-        "PALANTIR": "PLTR", "SNOWFLAKE": "SNOW", "CROWDSTRIKE": "CRWD",
-        "SHOPIFY": "SHOP",
-    }
-
-    def _extract_stock_query(self, text: str) -> list[str] | None:
-        """Detect if text is a stock/market question and extract tickers.
-
-        Returns a list of ticker symbols if detected, None otherwise.
-        """
-        import re as _re
-        lower = text.lower().strip()
-
-        # Check if input is JUST tickers/company names (e.g. "pypl, google, meta")
-        words = [w for w in _re.findall(r'\b(\w+)\b', text) if w.strip()]
-        _ticker_values = set(self._NAMES.values())
-        if words:
-            all_known = all(
-                w.upper() in self._NAMES                   # known name (any case)
-                or w.upper() in _ticker_values              # known ticker symbol (any case)
-                or (w.isupper() and len(w) <= 5 and w.isalpha())  # explicit uppercase ticker
-                for w in words
-            )
-            if all_known and len(words) <= 10:
-                found = []
-                for w in words:
-                    up = w.upper()
-                    sym = self._NAMES.get(up, up)
-                    if sym not in found:
-                        found.append(sym)
-                return found if found else None
-
-        # Must contain a stock-related trigger phrase
-        triggers = [
-            r"how.s\b", r"how is\b", r"how are\b", r"what.s\b",
-            r"what about\b", r"check\b", r"analyze\b", r"analysis\b",
-            r"price of\b", r"quote\b", r"tell me about\b",
-            r"doing\b", r"performing\b", r"looking\b",
-            r"update on\b", r"status of\b", r"compare\b",
-        ]
-        if not any(_re.search(t, lower) for t in triggers):
-            return None
-
-        found = []
-
-        # Look for explicit tickers (1-5 uppercase letters)
-        for word in _re.findall(r'\b([A-Z]{1,5})\b', text):
-            if word not in {"I", "A", "IS", "IT", "AM", "DO", "IF", "OR",
-                           "ON", "AT", "IN", "TO", "UP", "AN", "AND", "THE",
-                           "HOW", "ARE", "FOR", "BUT", "NOT", "ALL", "CAN",
-                           "HAS", "WAS", "MY", "ME", "SO", "OF", "BE"}:
-                found.append(word)
-
-        # Look for company names
-        for word in _re.findall(r'\b(\w+)\b', text):
-            up = word.upper()
-            if up in self._NAMES and self._NAMES[up] not in found:
-                found.append(self._NAMES[up])
-
-        return found if found else None
-
-    _CAPABILITIES = (
-        "## What I can do\n\n"
-        "| Command | Description |\n"
-        "|---|---|\n"
-        "| `.analyze TICKER` | Full market analysis (price, P/E, technicals, verdict) |\n"
-        "| `.analyze PYPL, Google, Nvidia` | Analyze multiple stocks at once |\n"
-        "| `how's AAPL doing?` | Natural language stock queries |\n"
-        "| `buy 10 AAPL` | Place equity orders (with confirmation) |\n"
-        "| `.portfolio` | View your current positions |\n"
-        "| `.watch AAPL > 200` | Set price alerts |\n"
-        "| `.model` | Switch LLM models |\n"
-        "| `.help` | Show all commands |\n\n"
-        "Ask me about any stock, option, or your portfolio."
-    )
-
-    def _handle_meta_question(self, text: str) -> str | None:
-        """Return canned response for help/greeting/off-topic questions."""
-        import re as _re
-        lower = text.lower().strip().rstrip("?!.")
-
-        # Capability questions
-        cap_patterns = [
-            r"what can you do", r"what do you do", r"what are you",
-            r"who are you", r"help me", r"capabilities",
-            r"what.s your (purpose|function|job)",
-            r"how do (i|you) use", r"what commands",
-            r"w.?a?h?t can you",  # typo variants
-            r"can you do", r"you able to",
-        ]
-        if any(_re.search(p, lower) for p in cap_patterns):
-            return self._CAPABILITIES
-
-        # Greetings
-        if lower in {"hi", "hello", "hey", "sup", "yo", "gm", "good morning",
-                      "good afternoon", "good evening", "whats up", "what's up"}:
-            return "Hey. Ask me about any stock, or use `.analyze TICKER` for a full report."
-
-        # Vague trading questions without a ticker -- guide the user
-        vague_patterns = [
-            r"(stock|what).*(recommend|suggestion|pick|buy|invest)",
-            r"(which|what) (one|stock|should).*(buy|sell|trade|invest|pick)",
-            r"(give|suggest|find|show).*(stock|trade|buy|pick|play)",
-            r"what (to|should i) (buy|sell|trade|invest)",
-            r"(any|some|good) (stock|trade|play|pick|idea)",
-        ]
-        if any(_re.search(p, lower) for p in vague_patterns):
-            return (
-                "I need a ticker to work with. Try:\n\n"
-                "| Example | What it does |\n"
-                "|---|---|\n"
-                "| `.analyze NVDA` | Full analysis with verdict |\n"
-                "| `how's AAPL doing?` | Quick price + technicals |\n"
-                "| `.portfolio` | See your current positions |\n\n"
-                "Give me a ticker and I'll tell you if it's a buy, sell, or hold."
-            )
-
         return None
 
     # -- Chat ------------------------------------------------------------------
@@ -576,27 +434,10 @@ class AgentHood:
         if not hasattr(self, "_history"):
             self._history: list[tuple[str, str]] = []
 
-        # Step 1: watch/alert/analyze detection (bypasses LLM)
+        # Step 1: watch/alert detection (structural, bypasses LLM)
         if output_schema is None:
             direct = await self._direct_dispatch(prompt)
             if direct is not None:
-                # Handle analyze sentinel -- run analyze for each ticker
-                if isinstance(direct, dict) and "__analyze__" in direct:
-                    tickers = direct["__analyze__"]
-                    results = []
-                    for sym in tickers:
-                        try:
-                            r = await self.analyze(sym, _progress=_progress)
-                            results.append(r)
-                        except Exception as exc:
-                            results.append(f"Error analyzing {sym}: {exc}")
-                    combined = "\n\n".join(results)
-                    self._history.append(("user", prompt))
-                    self._history.append(("assistant", combined))
-                    if len(self._history) > 40:
-                        self._history = self._history[-40:]
-                    return combined
-
                 self._history.append(("user", prompt))
                 self._history.append(("assistant", str(direct)))
                 if len(self._history) > 40:
