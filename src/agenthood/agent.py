@@ -587,6 +587,19 @@ class AgentHood:
         if _progress:
             _progress("thinking...")
 
+        # Inject conversation history so the LLM can handle follow-ups
+        # like "which one to buy?" that reference prior turns.
+        if self._history:
+            ctx_lines = []
+            for role, text in self._history[-20:]:
+                label = "User" if role == "user" else "Assistant"
+                # Truncate long responses to keep context lean
+                snippet = text[:800] + "..." if len(text) > 800 else text
+                ctx_lines.append(f"{label}: {snippet}")
+            self._agent.set_context(
+                "Previous conversation:\n" + "\n".join(ctx_lines)
+            )
+
         result = await self._agent.infer(
             prompt, output_type=output_schema, **kwargs
         )
