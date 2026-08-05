@@ -140,10 +140,7 @@ def _format_tool_result(tool_name: str, raw_json: str) -> str | None:
     results = data.get("results") if isinstance(data, dict) else None
     if results is None and isinstance(data, list):
         results = data
-    if not results or not isinstance(results, list):
-        return None
-
-    first = results[0] if results else {}
+    first = results[0] if (results and isinstance(results, list)) else {}
 
     def _price(v: str | None) -> str:
         """Clean price: $58.53 not $58.530000."""
@@ -211,6 +208,23 @@ def _format_tool_result(tool_name: str, raw_json: str) -> str | None:
             ]
             parts.append("\n".join(lines))
         return "\n\n".join(parts)
+
+    # -- Portfolio --
+    p_data = data.get("data", {}) if isinstance(data, dict) and "data" in data else data
+    if isinstance(p_data, dict) and "total_value" in p_data:
+        val = _price(p_data.get("total_value"))
+        eq = _price(p_data.get("equity_value"))
+        crypto = _price(p_data.get("crypto_value"))
+        cash = _price(p_data.get("cash"))
+        bp = _price(p_data.get("buying_power", {}).get("buying_power") if isinstance(p_data.get("buying_power"), dict) else p_data.get("buying_power"))
+        lines = [
+            f"Portfolio Value : [bold cyan]{val}[/bold cyan]",
+            f"Equities        : [bold]{eq}[/bold]",
+            f"Crypto          : [bold]{crypto}[/bold]",
+            f"Cash            : [bold]{cash}[/bold]",
+            f"Buying Power    : [bold green]{bp}[/bold green]"
+        ]
+        return "\n".join(lines)
 
     # -- Accounts --
     if "account_number" in first:
@@ -580,33 +594,69 @@ class AgentHood:
             or "no tool found" in ext_clean
         ):
             import re
+            p_lower = prompt.lower().strip()
             p_upper = prompt.upper().strip()
-            # 1. Ticker query check
-            tickers = re.findall(r'\b([A-Z]{1,5})\b', p_upper)
-            _STOP = {
-                "I", "A", "AM", "AN", "AS", "AT", "BE", "BY", "DO", "GO",
-                "IF", "IN", "IS", "IT", "ME", "MY", "NO", "OF", "OK", "ON",
-                "OR", "SO", "TO", "UP", "US", "WE", "THE", "AND", "FOR",
-                "NOT", "YOU", "ALL", "CAN", "HAD", "HER", "WAS", "ONE",
-                "OUR", "OUT", "HAS", "HIS", "HOW", "ITS", "MAY", "NEW",
-                "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GET", "HIM",
-                "LET", "SAY", "SHE", "TOO", "USE", "BUY", "SELL", "WHAT",
-                "SHOW", "PRICE", "STOCK", "QUOTE", "PORTFOLIO", "POSITIONS"
-            }
-            tickers = [t for t in tickers if t not in _STOP]
-            if tickers:
+
+            # A. Portfolio / positions query check
+            if any(k in p_lower for k in ("portofoilo", "portfolio", "positions", "holdings", "my stocks")):
                 try:
+                    acct = await self._get_account_number()
+                    raw = await self._call_tool_direct(
+                        "robinhood_get_portfolio",
+                        {"account_number": acct}
+                    )
+                    raw_str = raw if isinstance(raw, str) else str(raw)
+                    ext = _extract_response(raw_str)
+                    formatted = _format_tool_result("robinhood_get_portfolio", ext)
+                    if formatted:
+                        extracted = formatted
+                except Exception as exc:
+                    logger.debug("Portfolio fallback failed: %s", exc)
+
+            # B. Recommendation / buy queries check (if no response yet)
+            elif any(k in p_lower for k in ("what should i buy", "what to buy", "recommend", "best stocks", "top stocks", "suggestions")):
+                try:
+                    # Fetch popular watchlists or default trending tickers
                     raw = await self._call_tool_direct(
                         "robinhood_get_equity_quotes",
-                        {"symbols": tickers[:5]}
+                        {"symbols": ["AAPL", "NVDA", "MSFT", "AMZN", "GOOGL"]}
                     )
                     raw_str = raw if isinstance(raw, str) else str(raw)
                     ext = _extract_response(raw_str)
                     formatted = _format_tool_result("robinhood_get_equity_quotes", ext)
                     if formatted:
-                        extracted = formatted
+                        extracted = f"Market Watch / Recommendations:\n\n{formatted}"
                 except Exception as exc:
-                    logger.debug("Direct tool fallback failed: %s", exc)
+                    logger.debug("Recommendation fallback failed: %s", exc)
+
+            # C. Ticker query check
+            if extracted.strip().lower() in ("", "no appropriate tool found", "no tool found", "no tool selected") or "no appropriate tool" in extracted.strip().lower():
+                tickers = re.findall(r'\b([A-Z]{1,5})\b', p_upper)
+                _STOP = {
+                    "I", "A", "AM", "AN", "AS", "AT", "BE", "BY", "DO", "GO",
+                    "IF", "IN", "IS", "IT", "ME", "MY", "NO", "OF", "OK", "ON",
+                    "OR", "SO", "TO", "UP", "US", "WE", "THE", "AND", "FOR",
+                    "NOT", "YOU", "ALL", "CAN", "HAD", "HER", "WAS", "ONE",
+                    "OUR", "OUT", "HAS", "HIS", "HOW", "ITS", "MAY", "NEW",
+                    "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GET", "HIM",
+                    "LET", "SAY", "SHE", "TOO", "USE", "BUY", "SELL", "WHAT",
+                    "SHOW", "PRICE", "STOCK", "QUOTE", "PORTFOLIO", "POSITIONS",
+                    "SHOULD", "LIKE", "LOOKS", "HOW"
+                }
+                tickers = [t for t in tickers if t not in _STOP]
+                if tickers:
+                    try:
+                        raw = await self._call_tool_direct(
+                            "robinhood_get_equity_quotes",
+                            {"symbols": tickers[:5]}
+                        )
+                        raw_str = raw if isinstance(raw, str) else str(raw)
+                        ext = _extract_response(raw_str)
+                        formatted = _format_tool_result("robinhood_get_equity_quotes", ext)
+                        if formatted:
+                            extracted = formatted
+                    except Exception as exc:
+                        logger.debug("Direct tool fallback failed: %s", exc)
 
         # Fallback: if still empty, give scope message
         if not extracted.strip():
