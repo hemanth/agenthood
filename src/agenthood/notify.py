@@ -33,26 +33,35 @@ class OsxNotifier(Notifier):
 
 class NtfyNotifier(Notifier):
     """Push notification via ntfy.sh (https://ntfy.sh)."""
-    def __init__(self, topic: str, server: str = 'https://ntfy.sh'):
+    def __init__(self, topic: str, server: str = 'https://ntfy.sh', session: Optional[Any] = None):
         self.topic = topic
         self.server = server.rstrip('/')
+        self.session = session
 
     async def send(self, title: str, body: str) -> None:
         import aiohttp
         url = f'{self.server}/{self.topic}'
         headers = {'Title': title, 'Priority': 'high',
                    'Tags': 'chart_with_upwards_trend'}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=body.encode(),
-                                    headers=headers) as r:
+        sess = self.session
+        close_sess = False
+        if sess is None:
+            sess = aiohttp.ClientSession()
+            close_sess = True
+        try:
+            async with sess.post(url, data=body.encode(), headers=headers) as r:
                 if r.status not in (200, 201):
                     logger.warning('ntfy returned %s', r.status)
+        finally:
+            if close_sess:
+                await sess.close()
 
 
 class WebhookNotifier(Notifier):
     """POST JSON to a webhook URL (Discord, Slack, Teams, custom)."""
-    def __init__(self, url: str):
+    def __init__(self, url: str, session: Optional[Any] = None):
         self.url = url
+        self.session = session
 
     def _validate_url(self) -> bool:
         """Block SSRF -- reject private/loopback/link-local targets."""
@@ -81,14 +90,21 @@ class WebhookNotifier(Notifier):
             'content': f'**{title}**\n{body}',
             'title': title, 'body': body,
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.url, json=payload) as r:
+        sess = self.session
+        close_sess = False
+        if sess is None:
+            sess = aiohttp.ClientSession()
+            close_sess = True
+        try:
+            async with sess.post(self.url, json=payload) as r:
                 if r.status not in (200, 201, 204):
                     from urllib.parse import urlparse
                     parsed = urlparse(self.url)
                     safe_url = f"{parsed.scheme}://{parsed.netloc}/..."
-                    logger.warning('Webhook %s returned %s', safe_url,
-                                   r.status)
+                    logger.warning('Webhook %s returned %s', safe_url, r.status)
+        finally:
+            if close_sess:
+                await sess.close()
 
 
 class TelegramNotifier(Notifier):

@@ -105,10 +105,10 @@ class TestNotionalCap:
                              {"quantity": 1000, "price": 1000}, None)
         assert result.action == HookAction.ALLOW
 
-    async def test_no_price_no_block(self):
+    async def test_no_price_blocks_when_cap_set(self):
         guard = trading_guard(dry_run=False, max_order_value=500, allowed_symbols=[])
         result = await guard("place_equity_order", {"quantity": 10}, None)
-        assert result.action == HookAction.ALLOW  # price=0 → notional=0
+        assert result.action == HookAction.DENY  # price=0 → unknown notional blocked to prevent cap bypass
 
     async def test_limit_price_field_used(self):
         guard = trading_guard(dry_run=False, max_order_value=100, allowed_symbols=[])

@@ -146,10 +146,11 @@ def parse_watch_prompt(prompt: str) -> Optional[dict]:
         shares = int(sell_match.group(1))
 
     # Ticker — first uppercase word that looks like a ticker
-    tickers = _TICKER_RE.findall(p)
-    # Filter stop words that happen to be all-caps
-    _STOP = {"I", "A", "THE", "AND", "OR", "IF", "WHEN", "BUY", "SELL",
-              "WATCH", "ALERT", "NOTIFY", "ME", "MY", "IT", "AT"}
+    tickers = _TICKER_RE.findall(p.upper())
+    _STOP = {"AM", "AN", "AS", "AT", "BE", "BY", "DO", "IF", "IN", "IS",
+             "ME", "MY", "TO", "UP", "US", "WE", "THE", "AND", "FOR",
+             "WATCH", "ALERT", "NOTIFY", "BUY", "SELL", "WHEN", "IT",
+             "DROPS", "FALLS", "RISES", "GOES", "ABOVE", "BELOW"}
     tickers = [t for t in tickers if t not in _STOP]
     if not tickers:
         return None

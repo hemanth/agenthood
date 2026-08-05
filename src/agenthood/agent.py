@@ -599,15 +599,15 @@ class AgentHood:
             # Direct fallback for stock quote lookups when LLM tool selection fails
             tickers = re.findall(r'\b([A-Z]{1,5})\b', p_upper)
             _STOP = {
-                "I", "A", "AM", "AN", "AS", "AT", "BE", "BY", "DO", "GO",
-                "IF", "IN", "IS", "IT", "ME", "MY", "NO", "OF", "OK", "ON",
-                "OR", "SO", "TO", "UP", "US", "WE", "THE", "AND", "FOR",
-                "NOT", "YOU", "ALL", "CAN", "HAD", "HER", "WAS", "ONE",
+                "AM", "AN", "AS", "AT", "BE", "BY", "DO",
+                "IF", "IN", "IS", "ME", "MY", "NO", "OF", "OK",
+                "OR", "TO", "UP", "US", "WE", "THE", "AND", "FOR",
+                "NOT", "YOU", "CAN", "HAD", "HER", "WAS", "ONE",
                 "OUR", "OUT", "HAS", "HIS", "HOW", "ITS", "MAY", "NEW",
-                "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GET", "HIM",
+                "OLD", "SEE", "WAY", "WHO", "DID", "GET", "HIM",
                 "LET", "SAY", "SHE", "TOO", "USE", "BUY", "SELL", "WHAT",
                 "SHOW", "PRICE", "STOCK", "QUOTE", "PORTFOLIO", "POSITIONS",
-                "SHOULD", "LIKE", "LOOKS", "HOW"
+                "SHOULD", "LIKE", "LOOKS"
             }
             tickers = [t for t in tickers if t not in _STOP]
             if tickers:
@@ -635,7 +635,15 @@ class AgentHood:
         self._history.append(("user", prompt))
         self._history.append(("assistant", extracted))
         if len(self._history) > 40:
-            self._history = self._history[-40:]
+            # Find the nearest safe 'user' turn to avoid splitting assistant tool_call / tool_result pairs
+            target_idx = len(self._history) - 40
+            safe_idx = target_idx
+            for i in range(target_idx, len(self._history)):
+                turn = self._history[i]
+                if isinstance(turn, (list, tuple)) and turn[0] == "user":
+                    safe_idx = i
+                    break
+            self._history = self._history[safe_idx:]
 
         return extracted
 
@@ -1072,7 +1080,7 @@ Use real numbers from the data. If missing, write N/A."""
         while True:
             try:
                 await asyncio.sleep(CHECK_INTERVAL)
-                new_token = self._token_manager.get_valid_token()
+                new_token = await self._token_manager.get_valid_token_async()
                 if new_token and self._mcp_adapter:
                     transport = self._mcp_adapter.transport
                     if hasattr(transport, "config") and transport.config.auth:

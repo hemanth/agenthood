@@ -115,8 +115,8 @@ class TokenManager:
             logger.warning("Could not load token file: %s", e)
             return ""
 
-    def get_valid_token(self) -> str:
-        """Return a valid access token, refreshing if needed."""
+    async def get_valid_token_async(self) -> str:
+        """Return a valid access token, refreshing asynchronously if needed."""
         if not self._tokens:
             return self.load()
 
@@ -131,11 +131,23 @@ class TokenManager:
             logger.debug("Token valid for %.0f more seconds", remaining)
             return access_token
 
-        # Token expired or near-expiry — try refresh
-        logger.info(
-            "Token expires in %.0f seconds — refreshing...", max(remaining, 0)
-        )
-        return self._do_refresh() or access_token  # fall back to old token on error
+        logger.info("Token expires in %.0f seconds — refreshing...", max(remaining, 0))
+        refresh_tok = self._tokens.get("refresh_token", "")
+        if not refresh_tok or not self._client_id:
+            return access_token
+
+        new_tokens = await asyncio.to_thread(_refresh_token, refresh_tok, self._client_id)
+        if not new_tokens or "access_token" not in new_tokens:
+            return access_token
+
+        self._tokens = new_tokens
+        if self._token_file:
+            try:
+                self._token_file.write_text(json.dumps(new_tokens, indent=2))
+                logger.info("✅ Token refreshed and saved to %s", self._token_file)
+            except Exception as e:
+                logger.warning("Could not save refreshed token: %s", e)
+        return new_tokens["access_token"]
 
     def _do_refresh(self) -> str:
         """Perform the refresh_token grant and persist new tokens."""
@@ -161,7 +173,22 @@ class TokenManager:
             except Exception as e:
                 logger.warning("Could not save refreshed token: %s", e)
 
-        return new_tokens["access_token"]
+    def get_valid_token(self) -> str:
+        """Return a valid access token, refreshing synchronously if needed."""
+        if not self._tokens:
+            return self.load()
+
+        access_token = self._tokens.get("access_token", "")
+        if not access_token:
+            return ""
+
+        exp = _token_exp(access_token)
+        remaining = exp - time.time()
+
+        if remaining > REFRESH_BUFFER_SECS:
+            return access_token
+
+        return self._do_refresh() or access_token
 
     def seconds_until_expiry(self) -> float:
         token = self._tokens.get("access_token", "")

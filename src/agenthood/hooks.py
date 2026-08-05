@@ -58,9 +58,16 @@ def trading_guard(dry_run: bool, max_order_value: float, allowed_symbols: list[s
 
         # ── Notional cap ───────────────────────────────────────────────────
         if _matches(tool_name, _ORDER_SUFFIXES) and max_order_value > 0:
-            qty = float(params.get("quantity") or 1)
-            price = float(params.get("price") or params.get("limit_price") or 0)
+            qty = float(params.get("quantity") or params.get("shares") or 1)
+            price = float(params.get("price") or params.get("limit_price") or params.get("stop_price") or 0)
             notional = float(params.get("dollar_amount") or (qty * price) or 0)
+            if notional == 0:
+                reason = (
+                    f"⛔ Cannot determine order notional value to enforce ${max_order_value:.2f} cap. "
+                    "Specify limit_price or dollar_amount."
+                )
+                logger.warning(reason)
+                return HookResult(action=HookAction.DENY, reason=reason)
             if notional > max_order_value:
                 reason = (
                     f"⛔ Order notional ${notional:.2f} exceeds cap "
