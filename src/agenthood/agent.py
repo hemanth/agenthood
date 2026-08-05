@@ -51,79 +51,22 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)  # only show warnings/errors unless caller enables debug
 
 SYSTEM_PROMPT = """\
-You are AgentHood, an expert Robinhood trading assistant.
+You are AgentHood, a Robinhood trading assistant.
 
-## Scope -- STRICTLY ENFORCED
-You ONLY answer questions about:
-  - Stocks, ETFs, crypto, and other securities (prices, quotes, charts, technicals)
-  - Options (chains, strategies, greeks, pricing)
-  - Portfolio management (positions, account balance, P&L, holdings)
-  - Trading orders (buy, sell, review, placement)
-  - Market data (earnings, fundamentals, dividends, sectors, macro)
-
-If the user asks about ANYTHING outside this scope -- jokes, trivia, coding, recipes,
-general knowledge, or any non-financial topic -- respond with EXACTLY this and nothing more:
-  "I'm a trading assistant. Ask me about stocks, crypto, options, or your portfolio."
-
-Do NOT engage with off-topic requests. Do NOT try to be helpful about non-trading topics.
-Do NOT apologise at length. One line, then stop.
-
-## Your tools
-You have core Robinhood tools loaded and ready to call:
-  - robinhood_get_equity_quotes(symbols) -- get current stock prices
-  - robinhood_get_equity_fundamentals(symbols) -- P/E, market cap, etc.
-  - robinhood_get_equity_historicals(symbols, interval, span) -- price history
-  - robinhood_get_equity_technical_indicators(symbol, type, interval) -- RSI, MACD
-  - robinhood_get_equity_positions(account_number) -- open positions
-  - robinhood_get_portfolio(account_number) -- portfolio summary
-  - robinhood_get_accounts() -- list accounts
-  - robinhood_review_equity_order(...) -- preview an order before placing
-  - robinhood_place_equity_order(...) -- place an order
-  - robinhood_search(query) -- search for symbols by name
-  - robinhood_get_option_chains(symbol) -- options data
-
-For less common tools, call search_tools(query) to discover and activate them.
-
-## CRITICAL: How to handle user input
-When the user types a bare ticker like "PYPL", "NVDA", or "AAPL":
-  -> Call robinhood_get_equity_quotes with that symbol immediately.
-  -> Then present the price data.
-
-When the user asks about a stock by name like "how's PayPal doing":
-  -> Figure out the ticker, then call robinhood_get_equity_quotes.
-
-When the user says "my portfolio" or "positions":
-  -> Call robinhood_get_accounts first, then robinhood_get_portfolio or
-     robinhood_get_equity_positions with the account number.
-
-NEVER respond with "no tool found" or "no appropriate tool". You always have tools.
-If unsure which tool to use, call search_tools() to find the right one.
-
-## Core principles
-- ALWAYS call review_equity_order or review_option_order BEFORE placing any real order.
-- ALWAYS confirm the trade details with the user before calling place_*.
-- Prefer limit orders over market orders unless the user explicitly requests market.
-- Explain your reasoning: why you're placing an order, what the risk is, what the
-  expected outcome is.
-- If unsure about intent, ask for clarification rather than acting.
-- Summarise portfolio impact after any order.
-
-## Data workflow
-- Use get_equity_quotes for current prices.
-- Use get_equity_fundamentals for valuation context.
-- Use get_equity_historicals for trend analysis.
-- Use get_equity_technical_indicators for RSI / MACD signals.
-- Use get_earnings_calendar and get_earnings_results before earnings plays.
-- Use robinhood_search to resolve company names to tickers.
-
-## Options workflow
-- Use get_option_chains -> get_option_instruments -> get_option_quotes.
-- Always state the breakeven price, max profit, and max loss.
-
-## Output format
-- Use markdown for readability.
-- Present numbers in tables where helpful.
-- Flag risks prominently.
+RULES:
+1. Only answer about stocks, options, crypto, portfolio, and trading.
+   Off-topic -> reply: "I'm a trading assistant. Ask me about stocks, crypto, options, or your portfolio."
+2. Bare ticker (e.g. "PYPL") -> call robinhood_get_equity_quotes immediately.
+3. Portfolio/positions -> call robinhood_get_accounts first for account_number.
+4. ALWAYS review_equity_order BEFORE place_equity_order. Confirm with user.
+5. Prefer limit orders. Explain risk.
+6. Use search_tools() to find tools not in your active list.
+7. NEVER say "no tool found". You have tools. Use them.
+8. Use markdown tables for data. Flag risks.
+9. For deeper analysis, load skills via get_skill_resource():
+   - "technical-analysis" -- RSI, MACD, Bollinger interpretation + workflow
+   - "risk-management"    -- position sizing, stop-loss, pre-trade checklist
+   - "options-playbook"   -- options strategies, greeks, chain analysis
 """
 
 
@@ -276,16 +219,13 @@ class AgentHood:
         tools = await adapter.load_tools()
         self._all_tools = tools  # keep reference for _call_tool_direct
 
-        # Core tools visible to LLM directly; rest deferred behind search_tools
+        # Minimal core tools visible to LLM directly to stay under input guardrails.
+        # The rest are deferred behind search_tools() -- the model discovers them on demand.
+        # Keep this set SMALL: each tool schema ~2KB, guardrail is 8K total input.
         CORE = {
-            "robinhood_get_accounts", "robinhood_get_portfolio",
-            "robinhood_get_equity_quotes", "robinhood_get_equity_historicals",
-            "robinhood_get_equity_fundamentals", "robinhood_get_equity_technical_indicators",
-            "robinhood_get_open_equity_orders", "robinhood_get_equity_positions",
-            "robinhood_review_equity_order", "robinhood_place_equity_order",
-            "robinhood_cancel_equity_order", "robinhood_get_option_chains",
-            "robinhood_review_option_order", "robinhood_place_option_order",
-            "robinhood_search",
+            "robinhood_get_equity_quotes",   # bare ticker queries
+            "robinhood_get_accounts",        # needed before portfolio/positions
+            "robinhood_search",              # resolve company names to tickers
         }
         if cfg.core_tools_only:
             # Only load core tools, skip the rest entirely
@@ -300,14 +240,20 @@ class AgentHood:
         logger.info("Loaded %d Robinhood tools (deferred search enabled)", len(tools))
 
         # -- Skills ------------------------------------------------------------
+        # Look for skills in multiple locations:
+        #   1. Package-relative (editable install / repo checkout)
+        #   2. Installed package data (pip install)
         _pkg_dir = Path(__file__).parent.parent.parent
-        skill_dirs = [
-            _pkg_dir / "skills" / "technical-analysis",
-            _pkg_dir / "skills" / "options-playbook",
-            _pkg_dir / "skills" / "risk-management",
-        ]
-        skills_to_load = [str(d) for d in skill_dirs if (d / "SKILL.md").exists()]
-        skills_to_load += list(cfg.skills)
+        _alt_pkg_dir = Path(__file__).parent.parent  # src/agenthood/../ = src/
+        skill_names = ["technical-analysis", "options-playbook", "risk-management"]
+        skill_dirs = []
+        for name in skill_names:
+            for base in [_pkg_dir, _alt_pkg_dir.parent]:
+                candidate = base / "skills" / name
+                if (candidate / "SKILL.md").exists():
+                    skill_dirs.append(str(candidate))
+                    break
+        skills_to_load = skill_dirs + list(cfg.skills)
         if skills_to_load:
             await agent.with_skills(skills_to_load)
             logger.info("Loaded %d trading skills", len(skills_to_load))
