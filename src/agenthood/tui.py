@@ -662,7 +662,12 @@ def apply_model_switch(agent, new_model: str) -> None:
         agent.config.model = new_model
 
         # Auto-configure API base & key depending on provider
-        if ":free" in new_model or "/" in new_model:
+        if ":latest" in new_model or "ollama" in new_model.lower():
+            agent.config.api_base = "http://localhost:11434/v1"
+            if agent._agent is not None:
+                agent._agent.api_base = "http://localhost:11434/v1"
+                agent._agent.api_key = "ollama"
+        elif ":free" in new_model or "/" in new_model:
             openrouter_key = os.environ.get("OPENROUTER_API_KEY", "") or agent.config.api_key
             agent.config.api_base = "https://openrouter.ai/api/v1"
             if agent._agent is not None:
