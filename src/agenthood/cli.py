@@ -352,7 +352,16 @@ async def main() -> None:
                 if isinstance(response, dict):
                     print(response.get("error", str(response)))
                 else:
-                    print(response)
+                    try:
+                        from rich.console import Console
+                        console = Console()
+                        txt_str = str(response)
+                        if "[" in txt_str and "]" in txt_str:
+                            console.print(txt_str, highlight=False)
+                        else:
+                            print(txt_str)
+                    except Exception:
+                        print(response)
             return
 
         # Determine session name
