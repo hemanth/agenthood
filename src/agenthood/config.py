@@ -136,15 +136,17 @@ def load_config(path: str | None = None) -> AgentHoodConfig:
         cfg.mcp_token = os.environ["ROBINHOOD_TOKEN"]
     if os.environ.get("AGENTHOOD_MODEL"):
         cfg.model = os.environ["AGENTHOOD_MODEL"]
-    if os.environ.get("OPENAI_API_KEY"):
+    if os.environ.get("GROQ_API_KEY"):
+        cfg.api_key = os.environ["GROQ_API_KEY"]
+        cfg.api_base = "https://api.groq.com/openai/v1"
+        if not cfg.model or "free" in cfg.model:
+            cfg.model = "llama-3.3-70b-versatile"
+    elif os.environ.get("OPENAI_API_KEY"):
         cfg.api_key = os.environ["OPENAI_API_KEY"]
-    if os.environ.get("OPENROUTER_API_KEY") and not cfg.api_key:
+    elif os.environ.get("OPENROUTER_API_KEY") and not cfg.api_key:
         cfg.api_key = os.environ["OPENROUTER_API_KEY"]
         cfg.api_base = "https://openrouter.ai/api/v1"
         if not cfg.model or cfg.model in ("qwen3", "openai/gpt-oss-20b:free"):
-            # Benchmarked #1 free model for JSON tool-call accuracy on OpenRouter.
-            # Llama 3.3 70B has the highest schema adherence among free models,
-            # outperforming gpt-oss-20b for structured function calls.
             cfg.model = "meta-llama/llama-3.3-70b-instruct:free"
     if os.environ.get("AGENTHOOD_DRY_RUN", "").lower() in ("0", "false", "no"):
         cfg.dry_run = False
