@@ -541,8 +541,11 @@ def _render_with_code_blocks(text: str):
 
     fence_re = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
     if not fence_re.search(text):
-        # No code fences -- check for markdown features (tables, headers, bold)
-        has_markdown = any(marker in text for marker in ("|---|", "## ", "**"))
+        # Check for Rich markup tags (e.g. [bold cyan], [bold green], [green])
+        if "[" in text and "]" in text and any(tag in text for tag in ("green", "red", "yellow", "cyan", "bold")):
+            return Text.from_markup(text)
+        # Check for markdown features (tables, headers)
+        has_markdown = any(marker in text for marker in ("|---|", "## "))
         if has_markdown:
             return Markdown(text)
         return Text(text)

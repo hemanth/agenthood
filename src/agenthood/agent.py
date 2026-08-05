@@ -55,15 +55,16 @@ You are AgentHood, a Robinhood trading assistant.
 
 RULES:
 1. Only answer about stocks, options, crypto, portfolio, and trading.
-   Off-topic -> reply: "I'm a trading assistant. Ask me about stocks, crypto, options, or your portfolio."
-2. Bare ticker (e.g. "PYPL") -> call robinhood_get_equity_quotes immediately.
+   Off-topic -> one-liner decline.
+2. Ticker input (any case, e.g. "pypl", "PYPL", "aapl") -> uppercase it,
+   call robinhood_get_equity_quotes(symbols=["PYPL"]).
 3. Portfolio/positions -> call robinhood_get_accounts first for account_number.
 4. ALWAYS review_equity_order BEFORE place_equity_order. Confirm with user.
-5. Prefer limit orders. Explain risk.
-6. Use search_tools() to find tools not in your active list.
-7. NEVER say "no tool found". You have tools. Use them.
-8. Use markdown tables for data. Flag risks.
-9. For deeper analysis, load skills via get_skill_resource():
+5. Prefer limit orders. Explain risk for options/leveraged plays.
+6. Use search_tools() to discover tools not in your active set.
+7. After calling any tool, ALWAYS format the data as a clean markdown response.
+   Never return raw JSON. Use tables for structured data.
+8. For deeper analysis, load skills via get_skill_resource():
    - "technical-analysis" -- RSI, MACD, Bollinger interpretation + workflow
    - "risk-management"    -- position sizing, stop-loss, pre-trade checklist
    - "options-playbook"   -- options strategies, greeks, chain analysis
@@ -84,21 +85,38 @@ def _extract_response(result: Any) -> str:
     This function always returns a string.
     """
     if isinstance(result, str):
+        # Check if it's raw Robinhood JSON leaked as a string
+        stripped = result.strip()
+        if stripped.startswith('{') and '"data"' in stripped and '"guide"' in stripped:
+            try:
+                import json
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict) and "data" in parsed:
+                    return json.dumps(parsed["data"], indent=2)
+            except (json.JSONDecodeError, TypeError):
+                pass
         return result
 
     if isinstance(result, dict):
+        # Raw Robinhood tool response leaked through (model didn't format it)
+        if "data" in result and "guide" in result:
+            import json
+            return json.dumps(result["data"], indent=2)
         for key in ("text", "content", "result", "response", "output"):
             val = result.get(key)
             if val is not None:
                 if isinstance(val, (dict, list)):
                     import json
-                    return json.dumps(val)
-                return str(val)
+                    return json.dumps(val, indent=2)
+                # String value might be raw Robinhood JSON -- recurse
+                return _extract_response(val)
         # error key
         err = result.get("error")
         if err:
             return str(err)
-        return str(result)
+        # Unknown dict -- pretty-print rather than repr
+        import json
+        return json.dumps(result, indent=2, default=str)
 
     for attr in ("text", "content", "result"):
         val = getattr(result, attr, None)
@@ -106,6 +124,119 @@ def _extract_response(result: Any) -> str:
             return str(val)
 
     return str(result)
+
+
+# -- Tool result formatting (no LLM call needed) ------------------------------
+
+def _format_tool_result(tool_name: str, raw_json: str) -> str | None:
+    """Format raw Robinhood JSON into clean markdown. Returns None if unrecognized."""
+    import json as _json
+    from datetime import datetime, timezone
+    try:
+        data = _json.loads(raw_json)
+    except (_json.JSONDecodeError, TypeError):
+        return None
+
+    results = data.get("results") if isinstance(data, dict) else None
+    if results is None and isinstance(data, list):
+        results = data
+    if not results or not isinstance(results, list):
+        return None
+
+    first = results[0] if results else {}
+
+    def _price(v: str | None) -> str:
+        """Clean price: $58.53 not $58.530000."""
+        if not v:
+            return "-"
+        try:
+            return f"${float(v):,.2f}"
+        except (ValueError, TypeError):
+            return str(v)
+
+    def _time(ts: str | None) -> str:
+        """Humanize timestamp."""
+        if not ts:
+            return "-"
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            diff = now - dt
+            if diff.total_seconds() < 60:
+                return "just now"
+            if diff.total_seconds() < 3600:
+                return f"{int(diff.total_seconds() / 60)}m ago"
+            if diff.total_seconds() < 86400:
+                return f"{int(diff.total_seconds() / 3600)}h ago"
+            return dt.strftime("%b %d, %H:%M")
+        except Exception:
+            return str(ts)[:16]
+
+    # -- Quotes --
+    if "quote" in first:
+        parts = []
+        for entry in results:
+            q = entry.get("quote", {})
+            sym = q.get("symbol", "?")
+            cur = float(q.get("last_trade_price", 0) or 0)
+            prev = float(q.get("adjusted_previous_close", 0) or 0)
+            chg = cur - prev if prev else 0
+            pct = (chg / prev * 100) if prev else 0
+            arrow = "^" if chg >= 0 else "v"
+            sign = "+" if chg >= 0 else ""
+            bid = q.get("bid_price")
+            ask = q.get("ask_price")
+            state = q.get("state", "?")
+            trade_time = q.get("venue_last_trade_time")
+
+            # Compute a preliminary signal / recommendation based on momentum
+            if pct > 1.5:
+                signal_fmt = "[bold green]BUY[/bold green]"
+            elif pct < -1.5:
+                signal_fmt = "[bold red]SELL[/bold red]"
+            else:
+                signal_fmt = "[bold yellow]HOLD[/bold yellow]"
+
+            chg_color = "green" if chg >= 0 else "red"
+            chg_fmt = f"[{chg_color}]{sign}{chg:.2f} ({sign}{pct:.2f}%)[/{chg_color}]"
+
+            lines = [
+                f"Ticker     : [bold cyan]{sym}[/bold cyan]",
+                f"Last Price : [bold]{_price(str(cur))}[/bold] ({chg_fmt})",
+                f"Verdict    : {signal_fmt}",
+                f"Bid / Ask  : {_price(bid)} / {_price(ask)}",
+                f"Prev Close : {_price(str(prev))}",
+                f"Last Trade : {_time(trade_time)}",
+                f"Status     : {state.title()}",
+            ]
+            parts.append("\n".join(lines))
+        return "\n\n".join(parts)
+
+    # -- Accounts --
+    if "account_number" in first:
+        lines = ["**Accounts**", "",
+                 "| Account | Type | Nickname | Agentic |",
+                 "|---------|------|----------|---------|"]
+        for a in results:
+            num = a.get("account_number", "?")
+            masked = f"****{num[-4:]}" if len(num) > 4 else num
+            btype = a.get("brokerage_account_type", "?").replace("_", " ").title()
+            nick = a.get("nickname") or "-"
+            agentic = "Yes" if a.get("agentic_allowed") else "No"
+            lines.append(f"| {masked} | {btype} | {nick} | {agentic} |")
+        return "\n".join(lines)
+
+    # -- Search --
+    if "symbol" in first and "name" in first:
+        lines = ["| Symbol | Name |",
+                 "|--------|------|"]
+        for r in results:
+            sym = r.get("symbol", "?")
+            name = r.get("simple_name") or r.get("name", "?")
+            lines.append(f"| **{sym}** | {name} |")
+        return "\n".join(lines)
+
+    return None
 
 
 # -- AgentHood ----------------------------------------------------------------
@@ -221,11 +352,9 @@ class AgentHood:
 
         # Minimal core tools visible to LLM directly to stay under input guardrails.
         # The rest are deferred behind search_tools() -- the model discovers them on demand.
-        # Keep this set SMALL: each tool schema ~2KB, guardrail is 8K total input.
+        # Keep this set TINY: more tools = model picks wrong one for bare ticker queries.
         CORE = {
-            "robinhood_get_equity_quotes",   # bare ticker queries
-            "robinhood_get_accounts",        # needed before portfolio/positions
-            "robinhood_search",              # resolve company names to tickers
+            "robinhood_get_equity_quotes",   # bare ticker queries -- the most common case
         }
         if cfg.core_tools_only:
             # Only load core tools, skip the rest entirely
@@ -381,6 +510,7 @@ class AgentHood:
         prompt: str,
         output_schema: Optional[Type] = None,
         _progress: Optional[Callable[[str], None]] = None,
+        _on_token: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> str | Any:
         """Send a prompt to the agent. Returns the response text.
@@ -411,16 +541,70 @@ class AgentHood:
         if _progress:
             _progress("thinking...")
 
-        result = await self._agent.infer(
-            prompt, output_type=output_schema, **kwargs
-        )
+        # Suppress agentu's noisy error logging -- we handle failures gracefully.
+        import logging as _logging
+        _agentu_log = _logging.getLogger("agentu")
+        _old_level = _agentu_log.level
+        _agentu_log.setLevel(_logging.CRITICAL)
+        try:
+            result = await self._agent.infer(
+                prompt, output_type=output_schema, **kwargs
+            )
+        except Exception as exc:
+            logger.debug("infer() failed: %s", exc)
+            result = {"error": str(exc)}
+        finally:
+            _agentu_log.setLevel(_old_level)
 
         if output_schema is not None:
             return result
 
         extracted = _extract_response(result)
 
-        # Fallback: if model returns empty, give scope message
+        # If raw tool JSON leaked through (model didn't format), apply presentation.
+        if isinstance(result, dict) and "result" in result and "text" not in result:
+            raw_data = extracted
+            if raw_data.strip()[:1] in ('{', '['):
+                formatted = _format_tool_result(
+                    result.get("tool_used", ""), raw_data
+                )
+                if formatted:
+                    extracted = formatted
+
+        # Fallback: if model failed or returned error, try calling appropriate tool directly.
+        if (
+            isinstance(result, dict) and "error" in result
+        ) or extracted.strip() in ("", "No appropriate tool found"):
+            import re
+            p_upper = prompt.upper().strip()
+            # 1. Ticker query check
+            tickers = re.findall(r'\b([A-Z]{1,5})\b', p_upper)
+            _STOP = {
+                "I", "A", "AM", "AN", "AS", "AT", "BE", "BY", "DO", "GO",
+                "IF", "IN", "IS", "IT", "ME", "MY", "NO", "OF", "OK", "ON",
+                "OR", "SO", "TO", "UP", "US", "WE", "THE", "AND", "FOR",
+                "NOT", "YOU", "ALL", "CAN", "HAD", "HER", "WAS", "ONE",
+                "OUR", "OUT", "HAS", "HIS", "HOW", "ITS", "MAY", "NEW",
+                "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GET", "HIM",
+                "LET", "SAY", "SHE", "TOO", "USE", "BUY", "SELL", "WHAT",
+                "SHOW", "PRICE", "STOCK", "QUOTE", "PORTFOLIO", "POSITIONS"
+            }
+            tickers = [t for t in tickers if t not in _STOP]
+            if tickers:
+                try:
+                    raw = await self._call_tool_direct(
+                        "robinhood_get_equity_quotes",
+                        {"symbols": tickers[:5]}
+                    )
+                    raw_str = raw if isinstance(raw, str) else str(raw)
+                    ext = _extract_response(raw_str)
+                    formatted = _format_tool_result("robinhood_get_equity_quotes", ext)
+                    if formatted:
+                        extracted = formatted
+                except Exception as exc:
+                    logger.debug("Direct tool fallback failed: %s", exc)
+
+        # Fallback: if still empty, give scope message
         if not extracted.strip():
             extracted = (
                 "I'm a trading assistant. "

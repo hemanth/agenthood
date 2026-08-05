@@ -2,7 +2,7 @@
 
 Covers every branch of the dict-picking logic without needing a live agent.
 """
-import sys, os
+import sys, os, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import json
@@ -91,7 +91,7 @@ class TestExtractResponse:
 
     def test_list_value_uses_json_dumps(self):
         out = _extract_response({"output": [1, 2, 3]})
-        assert out == '[1, 2, 3]'
+        assert json.loads(out) == [1, 2, 3]
 
     def test_nested_dict_is_valid_json(self):
         out = _extract_response({"result": {"data": {"price": 42}}})

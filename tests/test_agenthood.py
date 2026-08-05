@@ -135,11 +135,12 @@ class TestChat:
         assert "trading assistant" in result
 
     async def test_chat_error_result(self):
-        """Error dict is extracted via _extract_response."""
+        """Error dict triggers fallback via _extract_response."""
         mock = _make_agent({"error": "No appropriate tool found"})
         hood = await _build_hood(mock)
         result = await hood.chat("show my portfolio")
         mock.infer.assert_awaited_once()
+        # Fallback: "show my portfolio" has no tickers, so error passes through
         assert "No appropriate tool found" in result
 
     async def test_chat_stores_history(self):

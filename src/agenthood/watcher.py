@@ -159,7 +159,10 @@ def parse_watch_prompt(prompt: str) -> Optional[dict]:
     prices = _PRICE_RE.findall(p)
     if not prices:
         return None
-    threshold = float(prices[-1].replace(",", ""))
+    try:
+        threshold = float(prices[-1].replace(",", ""))
+    except ValueError:
+        return None
 
     # Optional poll interval: "every 5 minutes" / "every 30 seconds" / "every 2m"
     interval = 30

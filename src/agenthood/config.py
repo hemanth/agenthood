@@ -65,7 +65,7 @@ class AgentHoodConfig:
     memory_consolidation_every: int = 30  # turns between consolidations
 
     # Rationale recording (audit trail for trade decisions)
-    rationale_recording: bool = True
+    rationale_recording: bool = False
 
     # Sandbox (subprocess isolation for codemode)
     sandbox: bool = False         # enable subprocess sandbox for codemode

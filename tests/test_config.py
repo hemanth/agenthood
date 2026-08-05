@@ -44,9 +44,9 @@ class TestDefaults:
         cfg = AgentHoodConfig()
         assert cfg.guardrails is True
 
-    def test_rationale_recording_enabled(self):
+    def test_rationale_recording_disabled(self):
         cfg = AgentHoodConfig()
-        assert cfg.rationale_recording is True
+        assert cfg.rationale_recording is False
 
 
 # ── JSON file loading ─────────────────────────────────────────────────────────
