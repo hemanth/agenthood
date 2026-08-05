@@ -1,6 +1,7 @@
 # agenthood
+> Robinhood trading agent: talk to your portfolio in plain English.
 
-Robinhood trading agent -- talk to your portfolio in plain English.
+https://github.com/user-attachments/assets/ad8595ab-e735-4967-a095-e49b18a33f63
 
 ```bash
 pip install agenthood
