@@ -139,15 +139,11 @@ def load_config(path: str | None = None) -> AgentHoodConfig:
     if os.environ.get("GROQ_API_KEY"):
         cfg.api_key = os.environ["GROQ_API_KEY"]
         cfg.api_base = "https://api.groq.com/openai/v1"
-        if not cfg.model or "free" in cfg.model:
-            cfg.model = "llama-3.3-70b-versatile"
     elif os.environ.get("OPENAI_API_KEY"):
         cfg.api_key = os.environ["OPENAI_API_KEY"]
     elif os.environ.get("OPENROUTER_API_KEY") and not cfg.api_key:
         cfg.api_key = os.environ["OPENROUTER_API_KEY"]
         cfg.api_base = "https://openrouter.ai/api/v1"
-        if not cfg.model or cfg.model in ("qwen3", "openai/gpt-oss-20b:free"):
-            cfg.model = "meta-llama/llama-3.3-70b-instruct:free"
     if os.environ.get("AGENTHOOD_DRY_RUN", "").lower() in ("0", "false", "no"):
         cfg.dry_run = False
 

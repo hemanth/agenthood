@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agenthood"
-version = "0.2.12"
+version = "0.2.13"
 description = "Robinhood trading agent powered by agentu + Robinhood MCP"
 readme = "README.md"
 license = { text = "MIT" }
