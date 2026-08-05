@@ -572,9 +572,13 @@ class AgentHood:
                     extracted = formatted
 
         # Fallback: if model failed or returned error, try calling appropriate tool directly.
+        ext_clean = extracted.strip().lower()
         if (
-            isinstance(result, dict) and "error" in result
-        ) or extracted.strip() in ("", "No appropriate tool found"):
+            (isinstance(result, dict) and "error" in result)
+            or ext_clean in ("", "no appropriate tool found", "no tool found", "no tool selected")
+            or "no appropriate tool" in ext_clean
+            or "no tool found" in ext_clean
+        ):
             import re
             p_upper = prompt.upper().strip()
             # 1. Ticker query check
