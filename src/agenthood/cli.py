@@ -392,12 +392,12 @@ async def main() -> None:
 
 
 def cli() -> None:
-    import signal
-    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+    import signal, os
+    signal.signal(signal.SIGINT, lambda *_: os._exit(0))
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        sys.exit(0)
+        os._exit(0)
 
 
 if __name__ == "__main__":
