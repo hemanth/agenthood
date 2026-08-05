@@ -354,7 +354,8 @@ async def main() -> None:
                 else:
                     try:
                         from rich.console import Console
-                        console = Console()
+                        # Force terminal colors if stdout supports color or environment requests it
+                        console = Console(force_terminal=True)
                         txt_str = str(response)
                         if "[" in txt_str and "]" in txt_str:
                             console.print(txt_str, highlight=False)
