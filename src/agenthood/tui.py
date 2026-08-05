@@ -1068,12 +1068,14 @@ async def tui_repl(agent, session_name: Optional[str] = None) -> None:
 
             # ── Input ─────────────────────────────────────────────────────────
             try:
-                # user_input = read_input()
                 input_task = asyncio.create_task(_read_input_async())
                 drain_task = asyncio.create_task(_drain_notifications_during_input(input_task))
                 await asyncio.wait([input_task, drain_task], return_when=asyncio.FIRST_COMPLETED)
                 drain_task.cancel()
-                user_input = await input_task
+                try:
+                    user_input = await input_task
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    raise KeyboardInterrupt
             except KeyboardInterrupt:
                 now = time.monotonic()
                 if now - _last_interrupt < 2.0:

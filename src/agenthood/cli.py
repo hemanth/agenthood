@@ -392,10 +392,12 @@ async def main() -> None:
 
 
 def cli() -> None:
+    import signal
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        pass  # clean exit — Ctrl+C is handled gracefully inside tui_repl
+    except (KeyboardInterrupt, SystemExit):
+        sys.exit(0)
 
 
 if __name__ == "__main__":
