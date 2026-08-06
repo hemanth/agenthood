@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Awaitable, Callable, Optional
 
 import httpx
@@ -24,6 +25,43 @@ MAX_TOKENS = 800
 # An interactive prompt cannot honour a multi-minute retry-after, so cap backoff
 # and degrade instead of hanging.
 MAX_BACKOFF_SECS = 4
+
+# Providers report how long the limit lasts. A per-day quota says "try again in
+# 202s" -- sleeping 1s then 2s against that just burns three seconds and still
+# fails, so give up immediately and let the caller fall to another model.
+_cooldowns: dict[str, float] = {}
+
+
+def _retry_after_secs(resp) -> float | None:
+    """Seconds the provider asked us to wait, if it said."""
+    raw = resp.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cooling_down(model: str) -> float:
+    """Seconds left on a recorded cooldown for *model*, 0 if it is usable."""
+    until = _cooldowns.get(model)
+    if until is None:
+        return 0.0
+    left = until - time.monotonic()
+    if left <= 0:
+        _cooldowns.pop(model, None)
+        return 0.0
+    return left
+
+
+def _set_cooldown(model: str, secs: float) -> None:
+    _cooldowns[model] = time.monotonic() + secs
+
+
+def reset_cooldowns() -> None:
+    """Forget every recorded cooldown (used by tests and .model switches)."""
+    _cooldowns.clear()
 
 CONVERSE_TEMPERATURE = 0.4
 CONVERSE_MAX_TOKENS = 500
@@ -119,6 +157,10 @@ async def _completion(
     Backoff is capped: a provider asking us to wait minutes is not something an
     interactive prompt can honour, so we give up and let the caller degrade.
     """
+    left = _cooling_down(model)
+    if left:
+        return "", f"rate limited (429), {int(left)}s left on {model}", False
+
     last_err = None
     for attempt in range(max_retries):
         try:
@@ -138,10 +180,21 @@ async def _completion(
                 )
                 if resp.status_code == 429:
                     last_err = "rate limited (429)"
-                    wait = min(2 ** attempt, max_backoff)
+                    retry_after = _retry_after_secs(resp)
+                    # Longer than we can plausibly wait -- stop now, remember it,
+                    # and let the caller try a different model instead of
+                    # sleeping through retries that cannot succeed.
+                    if retry_after is not None and retry_after > max_backoff:
+                        _set_cooldown(model, retry_after)
+                        logger.warning(
+                            "%s rate limited for %ss -- skipping to fallback",
+                            model, int(retry_after),
+                        )
+                        break
+                    wait = min(retry_after or (2 ** attempt), max_backoff)
                     if attempt == max_retries - 1:
                         break
-                    logger.warning("Rate limited (429), retrying in %ds...", wait)
+                    logger.warning("Rate limited (429), retrying in %gs...", wait)
                     await asyncio.sleep(wait)
                     continue
 

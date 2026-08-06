@@ -799,3 +799,90 @@ async def test_clear_history_clears_agentu_context():
     assert hood._history == []
     assert mock.conversation_history == []
     mock.clear_short_term_memory.assert_called_once()
+
+
+# ── Rate-limit backoff ────────────────────────────────────────────────────────
+
+class TestRetryAfterHandling:
+    """Regression: 'hi' spent 3.1s asleep on a limit it could never wait out.
+
+    Groq's per-day quota answers 429 with 'retry-after: 202'. Backing off 1s
+    then 2s against that burns three seconds and still fails, then falls to a
+    slow free model anyway.
+    """
+
+    def setup_method(self):
+        from agenthood.core.llm import reset_cooldowns
+        reset_cooldowns()
+
+    teardown_method = setup_method
+
+    def _resp(self, retry_after):
+        m = MagicMock()
+        m.status_code = 429
+        m.headers = {"retry-after": str(retry_after)} if retry_after else {}
+        return m
+
+    @pytest.mark.asyncio
+    async def test_long_retry_after_skips_sleeping(self):
+        from agenthood.core import llm
+        sleeps = []
+
+        async def no_sleep(s):
+            sleeps.append(s)
+
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.post = AsyncMock(return_value=self._resp(202))
+
+        with patch.object(llm.httpx, "AsyncClient", return_value=client), \
+             patch.object(llm.asyncio, "sleep", no_sleep):
+            content, err, _ = await llm._completion("m", "http://b", "k", [], max_retries=3)
+
+        assert content == ""
+        assert sleeps == [], "must not sleep against a 202s limit"
+        assert client.post.await_count == 1, "must not retry a limit it cannot wait out"
+
+    @pytest.mark.asyncio
+    async def test_short_retry_after_still_retries(self):
+        from agenthood.core import llm
+        sleeps = []
+
+        async def no_sleep(s):
+            sleeps.append(s)
+
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.post = AsyncMock(return_value=self._resp(1))
+
+        with patch.object(llm.httpx, "AsyncClient", return_value=client), \
+             patch.object(llm.asyncio, "sleep", no_sleep):
+            await llm._completion("m2", "http://b", "k", [], max_retries=3)
+
+        assert sleeps, "a 1s limit is worth waiting for"
+
+    @pytest.mark.asyncio
+    async def test_cooldown_skips_model_on_later_calls(self):
+        """Once a model reports a long limit, later turns must not re-ask it."""
+        from agenthood.core import llm
+
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.post = AsyncMock(return_value=self._resp(300))
+
+        with patch.object(llm.httpx, "AsyncClient", return_value=client):
+            await llm._completion("cold", "http://b", "k", [])
+            first = client.post.await_count
+            await llm._completion("cold", "http://b", "k", [])
+
+        assert client.post.await_count == first, "second call must be short-circuited"
+
+    def test_reset_cooldowns_clears_state(self):
+        from agenthood.core import llm
+        llm._set_cooldown("x", 100)
+        assert llm._cooling_down("x") > 0
+        llm.reset_cooldowns()
+        assert llm._cooling_down("x") == 0
