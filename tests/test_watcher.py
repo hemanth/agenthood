@@ -451,3 +451,38 @@ class TestParseEdgeCases:
         spec = parse_watch_prompt("buy 1 AMZN when below $1,800.00")
         assert spec is not None
         assert spec["threshold"] == pytest.approx(1800.0)
+
+
+# ── Interval must not be mistaken for the price ───────────────────────────────
+
+class TestIntervalDoesNotEatPrice:
+    """Regression: the threshold was the LAST number in the string.
+
+    'watch AAPL below $180 every 5 minutes' produced threshold=5.0, so the
+    watcher fired immediately on a documented syntax.
+    """
+
+    def test_minutes_suffix(self):
+        s = parse_watch_prompt("watch AAPL below $180 every 5 minutes")
+        assert s["threshold"] == 180.0
+        assert s["interval"] == 300
+
+    def test_seconds_suffix(self):
+        s = parse_watch_prompt("watch BTC below 80000 every 30 seconds")
+        assert s["threshold"] == 80000.0
+        assert s["interval"] == 30
+
+    def test_hour_suffix(self):
+        s = parse_watch_prompt("sell 20 MSFT when above $450 every 1 hour")
+        assert s["threshold"] == 450.0
+        assert s["interval"] == 3600
+
+    def test_short_unit(self):
+        s = parse_watch_prompt("buy 5 NVDA if price falls below 800 every 2m")
+        assert s["threshold"] == 800.0
+        assert s["interval"] == 120
+
+    def test_no_interval_keeps_default(self):
+        s = parse_watch_prompt("watch AAPL below $180")
+        assert s["threshold"] == 180.0
+        assert s["interval"] == 30

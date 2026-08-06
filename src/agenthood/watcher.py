@@ -95,6 +95,7 @@ class PriceWatcher:
 
 _TICKER_RE = re.compile(r'\b([A-Z]{1,5})\b')
 _PRICE_RE  = re.compile(r'\$?([\d,]+(?:\.\d+)?)')
+_INTERVAL_RE = re.compile(r'every\s+(\d+)\s*(s(?:ec\w*)?|m(?:in\w*)?|h(?:our\w*)?)\b')
 
 def parse_watch_prompt(prompt: str) -> Optional[dict]:
     """
@@ -156,18 +157,12 @@ def parse_watch_prompt(prompt: str) -> Optional[dict]:
         return None
     ticker = tickers[0]
 
-    # Threshold price — last number in the string (most likely to be the price)
-    prices = _PRICE_RE.findall(p)
-    if not prices:
-        return None
-    try:
-        threshold = float(prices[-1].replace(",", ""))
-    except ValueError:
-        return None
-
-    # Optional poll interval: "every 5 minutes" / "every 30 seconds" / "every 2m"
+    # Optional poll interval: "every 5 minutes" / "every 30 seconds" / "every 2m".
+    # Parsed BEFORE the price and cut out of the string: the threshold is taken as
+    # the last number, so leaving "every 5 minutes" in place made
+    # "watch AAPL below $180 every 5 minutes" a $5 threshold that fired at once.
     interval = 30
-    iv_m = re.search(r'every\s+(\d+)\s*(s(?:ec)?|m(?:in)?|h(?:our)?)', pl)
+    iv_m = _INTERVAL_RE.search(pl)
     if iv_m:
         n, unit = int(iv_m.group(1)), iv_m.group(2)
         if unit.startswith("h"):
@@ -176,6 +171,16 @@ def parse_watch_prompt(prompt: str) -> Optional[dict]:
             interval = n * 60
         else:
             interval = n
+        p = p[:iv_m.start()] + p[iv_m.end():]
+
+    # Threshold price — last number in what's left (most likely to be the price)
+    prices = _PRICE_RE.findall(p)
+    if not prices:
+        return None
+    try:
+        threshold = float(prices[-1].replace(",", ""))
+    except ValueError:
+        return None
 
     return dict(ticker=ticker, threshold=threshold, direction=direction,
                 action=action, shares=shares, interval=interval)

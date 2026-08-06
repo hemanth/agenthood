@@ -3,13 +3,63 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import sys
 
 from rich.markup import escape
 
 from .render import _strip_emoji, render_response
 from .theme import C_DIM, C_ERR, C_WARN, console
+
+# Order matters: the last actual trade is the truth, the rest are stand-ins for
+# when a venue has not printed one yet.
+_PRICE_KEYS = (
+    "last_trade_price",
+    "last_non_reg_trade_price",
+    "bid_price",
+    "ask_price",
+)
+
+
+def extract_quote_price(raw) -> float | None:
+    """Pull the last trade price out of a Robinhood equity-quotes response.
+
+    The payload is ``{"data": {"results": [{"quote": {...}, "close": {...}}]}}``.
+    Reading the top level instead means never matching, which used to send every
+    watcher poll down a regex scrape and then a full LLM round trip -- slow, and
+    it could latch onto a bid, an ask, or an unrelated number.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(raw, dict):
+        return None
+
+    data = raw.get("data", raw)
+    results = data.get("results") if isinstance(data, dict) else None
+    if not results:
+        return None
+    entry = results[0]
+    if not isinstance(entry, dict):
+        return None
+
+    quote = entry.get("quote", entry)
+    for key in _PRICE_KEYS:
+        val = (quote or {}).get(key)
+        if val not in (None, ""):
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                continue
+
+    close = entry.get("close") or {}
+    if close.get("price") not in (None, ""):
+        try:
+            return float(close["price"])
+        except (ValueError, TypeError):
+            pass
+    return None
 
 
 class WatchController:
@@ -23,36 +73,14 @@ class WatchController:
     # -- price source ---------------------------------------------------------
 
     async def _price_fn(self, ticker: str) -> float:
-        """Fetch latest bid price for a ticker via the Robinhood quote tool."""
-        try:
-            raw = await self._agent._call_tool_direct(
-                "robinhood_get_equity_quotes", {"symbols": [ticker.upper()]}
-            )
-            txt = str(raw)
-            # Try JSON first
-            try:
-                data = json.loads(txt)
-                for key in ("last_trade_price", "bid_price", "ask_price", "price"):
-                    v = data.get(key)
-                    if v is not None:
-                        return float(v)
-            except Exception:
-                pass
-            # Fall back: scrape first numeric-looking price
-            m = re.search(r'"?(?:price|last|bid)[":]?\s*"?(\d[\d,]*\.?\d*)"?', txt, re.I)
-            if m:
-                return float(m.group(1).replace(",", ""))
-            m = re.search(r'\$(\d[\d,]*(?:\.\d+)?)', txt)
-            if m:
-                return float(m.group(1).replace(",", ""))
-        except Exception:
-            pass
-        # Last resort: use chat() and scrape the panel output
-        result = await self._agent.chat(ticker)
-        m = re.search(r'\$(\d[\d,]*(?:\.\d+)?)', str(result))
-        if m:
-            return float(m.group(1).replace(",", ""))
-        raise ValueError(f"Cannot parse price for {ticker} from: {result!r}")
+        """Fetch the latest trade price for a ticker via the Robinhood quote tool."""
+        raw = await self._agent._call_tool_direct(
+            "robinhood_get_equity_quotes", {"symbols": [ticker.upper()]}
+        )
+        price = extract_quote_price(raw)
+        if price is None:
+            raise ValueError(f"Cannot parse price for {ticker} from: {str(raw)[:200]!r}")
+        return price
 
     async def _on_trigger(self, watcher, price) -> None:
         await self._queue.put((watcher, price))

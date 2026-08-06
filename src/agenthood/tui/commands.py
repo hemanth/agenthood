@@ -7,6 +7,7 @@ reach the LLM.  Its return value tells the REPL what to do next:
   False                     -- not a dot-command, pass to the agent
   "__portfolio__"           -- run the portfolio action
   "__positions__"           -- run the positions action
+  "__update__"              -- run the self-upgrade
   ("__quote__", "AAPL")     -- run the quote action for that ticker
   ["AAPL", "NVDA"]          -- run the analyze action for those tickers
 """
@@ -44,6 +45,10 @@ def handle_meta(cmd: str, agent) -> bool:
     if lower == ".sessions":
         print_sessions()
         return True
+
+    # .update -- pip upgrade from PyPI (async, so the REPL runs it)
+    if lower in (".update", ".upgrade"):
+        return "__update__"
 
     if lower in (".new", ".reset", ".clear"):
         agent.clear_history()

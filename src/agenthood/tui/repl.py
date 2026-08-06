@@ -17,6 +17,7 @@ from .render import (
 from .sessions import session_path
 from .theme import C_DIM, C_DIMMER, C_ERR, C_LABEL, C_WARN, console
 from .thinking import ThinkingDisplay
+from .update import run_update
 from .watch import WatchController
 
 DOUBLE_INTERRUPT_SECS = 2.0
@@ -128,6 +129,12 @@ async def tui_repl(agent, session_name: Optional[str] = None) -> None:
             # ── Dot-commands ──────────────────────────────────────────────────
             meta_result = handle_meta(user_input, agent)
             if meta_result is True:
+                _print_status(agent, turn, total_cost_usd)
+                continue
+
+            # .update -- self-upgrade from PyPI
+            if meta_result == "__update__":
+                await run_update()
                 _print_status(agent, turn, total_cost_usd)
                 continue
 

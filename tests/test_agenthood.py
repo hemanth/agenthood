@@ -777,3 +777,25 @@ async def test_reasoning_text_used_when_nothing_better():
         out = await hood._llm_completion("Analyze MSFT.")
 
     assert out == "salvaged text"
+
+
+@pytest.mark.asyncio
+async def test_clear_history_clears_agentu_context():
+    """Regression: .new cleared a list nothing read.
+
+    The context the model actually sees lives on the agentu Agent, so clearing
+    only AgentHood._history left the previous conversation fully in play.
+    """
+    mock = _make_agent({"response": "ok"})
+    mock.conversation_history = [{"role": "user", "content": "AAPL"}]
+    mock.clear_short_term_memory = MagicMock()
+
+    hood = await _build_hood(mock)
+    await hood.chat("AAPL")
+    assert hood._history
+
+    hood.clear_history()
+
+    assert hood._history == []
+    assert mock.conversation_history == []
+    mock.clear_short_term_memory.assert_called_once()

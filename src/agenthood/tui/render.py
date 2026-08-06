@@ -140,6 +140,7 @@ _HELP_META = [
     (".cost",       "token usage"),
     (".memory",     "remembered facts"),
     (".verbose",    "debug mode"),
+    (".update",     "upgrade agenthood from PyPI"),
     ("exit",        "quit"),
 ]
 

@@ -9,9 +9,12 @@ from .theme import PROMPT_CONT, PROMPT_MAIN
 
 _HIST_FILE = _DATA_DIR / "history"
 
-# All dot-commands that can be tab-completed
+# All dot-commands that can be tab-completed. Keep in sync with handle_meta --
+# the six most-used commands were missing here, so Tab did nothing for them.
 _DOT_COMMANDS = [
-    ".model", ".sessions", ".new", ".reset", ".cost", ".memory", ".findings", ".verbose",
+    ".analyze", ".portfolio", ".positions", ".quote", ".tools", ".help",
+    ".model", ".sessions", ".new", ".reset", ".cost", ".memory", ".findings",
+    ".verbose", ".update",
 ]
 
 # Common intent phrases for completion

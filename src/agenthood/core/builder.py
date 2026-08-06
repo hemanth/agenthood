@@ -19,6 +19,7 @@ from agentu import Agent
 
 from ..hooks import trading_guard
 from .prompts import SYSTEM_PROMPT
+from .toolargs import wrap_tool
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,10 @@ async def _connect_mcp(cfg: Any) -> tuple[Any, list]:
 
 def _register_tools(agent: Agent, tools: list, core_tools_only: bool) -> None:
     """Register MCP tools, deferring everything outside CORE_TOOLS."""
+    # Repair loosely-typed arguments before they reach MCP's strict validator.
+    for tool in tools:
+        wrap_tool(tool)
+
     if core_tools_only:
         # Only load core tools, skip the rest entirely
         for tool in tools:

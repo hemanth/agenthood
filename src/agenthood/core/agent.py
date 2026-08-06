@@ -295,8 +295,27 @@ class AgentHood(AgentuFacade):
         return extracted
 
     def clear_history(self) -> None:
-        """Clear conversation history (new session)."""
+        """Start a genuinely new conversation.
+
+        Our own ``_history`` is only used to give the no-tool conversational
+        path some continuity; the context the model actually sees lives on the
+        agentu Agent. Clearing just the former left the previous conversation
+        fully in play -- ``.new`` looked like it worked and changed nothing.
+        """
         self._history = []
+        agent = self._agent
+        if agent is None:
+            return
+        try:
+            history = getattr(agent, "conversation_history", None)
+            if isinstance(history, list):
+                history.clear()
+        except Exception as exc:            # pragma: no cover - defensive
+            logger.debug("could not clear agentu conversation history: %s", exc)
+        try:
+            agent.clear_short_term_memory()
+        except Exception as exc:            # pragma: no cover - defensive
+            logger.debug("could not clear agentu short-term memory: %s", exc)
 
     async def analyze(
         self,
