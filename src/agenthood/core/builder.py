@@ -46,19 +46,26 @@ class BuiltAgent:
 def discover_skill_dirs() -> list[str]:
     """Find the bundled trading skill directories.
 
-    Looks two levels above the ``agenthood`` package, which covers both an
-    editable install / repo checkout (``<repo>/skills``) and an installed
-    package (``<prefix>/skills``).
+    The skills live inside the package (``agenthood/skills/``) so they ship in
+    the wheel. They previously sat at the repo root, which meant a wheel install
+    silently loaded no skills at all -- ``pip install agenthood`` gave you an
+    agent with none of its trading knowledge.
+
+    The old repo-root location is still checked so an existing checkout that has
+    not been rebuilt keeps working.
     """
-    # __file__ is .../agenthood/core/builder.py, so the agenthood package dir is
-    # two up; the search base is two above that (matching the pre-split behaviour
-    # when this lived in agenthood/agent.py).
-    base = Path(__file__).parent.parent.parent.parent
+    pkg_dir = Path(__file__).parent.parent          # .../agenthood
+    bases = [
+        pkg_dir / "skills",                          # installed + editable (canonical)
+        pkg_dir.parent.parent / "skills",            # legacy: repo root
+    ]
     dirs = []
     for name in BUNDLED_SKILLS:
-        candidate = base / "skills" / name
-        if (candidate / "SKILL.md").exists():
-            dirs.append(str(candidate))
+        for base in bases:
+            candidate = base / name
+            if (candidate / "SKILL.md").exists():
+                dirs.append(str(candidate))
+                break
     return dirs
 
 

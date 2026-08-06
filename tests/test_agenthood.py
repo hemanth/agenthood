@@ -598,6 +598,28 @@ def test_bundled_skills_are_discoverable():
         assert Path(d, "SKILL.md").exists()
 
 
+def test_skills_live_inside_the_package():
+    """Regression: the wheel shipped no skills, so pip installs had none.
+
+    They sat at the repo root, outside `packages = ["src/agenthood"]`, so every
+    `pip install agenthood` produced an agent with zero trading knowledge and no
+    error. Keeping them under the package directory is what puts them in the
+    wheel -- assert on location, not just discoverability, because a repo
+    checkout would pass the discovery test either way.
+    """
+    from pathlib import Path
+    import agenthood
+    from agenthood.core.builder import discover_skill_dirs, BUNDLED_SKILLS
+
+    pkg_dir = Path(agenthood.__file__).parent
+    for name in BUNDLED_SKILLS:
+        assert (pkg_dir / "skills" / name / "SKILL.md").exists(), (
+            f"{name} must live in agenthood/skills/ or it will not ship in the wheel"
+        )
+    # and discovery must actually resolve to that in-package copy
+    assert all(str(pkg_dir) in d for d in discover_skill_dirs())
+
+
 def test_agent_module_shim_reexports():
     """agenthood.agent kept working after the move to agenthood.core."""
     import agenthood
