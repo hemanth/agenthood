@@ -80,10 +80,12 @@ async def _build_hood(mock_agent) -> "AgentHood":
         skills=[],
     )
 
-    # Patch Agent constructor and MCPToolAdapter
-    with patch("agenthood.agent.Agent", return_value=mock_agent), \
-         patch("agenthood.agent.TokenManager"), \
-         patch("agenthood.agent.asyncio.create_task"), \
+    # Patch Agent constructor and MCPToolAdapter.
+    # NB: these must target the modules where the names are *used*, not
+    # agenthood.agent -- that module now only re-exports them.
+    with patch("agenthood.core.builder.Agent", return_value=mock_agent), \
+         patch("agenthood.core.agent.TokenManager"), \
+         patch("agenthood.core.agent.asyncio.create_task"), \
          patch("agentu.mcp.transport.MCPServerConfig"), \
          patch("agentu.mcp.tool.MCPToolAdapter") as MockAdapter:
 
@@ -127,21 +129,67 @@ class TestChat:
         call_args = mock.infer.call_args[0][0]
         assert call_args == "buy 10 shares of NVDA"
 
-    async def test_chat_empty_response_gives_scope_message(self):
-        """Empty model response falls back to scope message."""
+    async def test_chat_empty_response_converses(self):
+        """Empty model response falls through to a conversational reply."""
         mock = _make_agent({"response": ""})
         hood = await _build_hood(mock)
-        result = await hood.chat("tell me a joke")
-        assert "trading assistant" in result
+        with patch("agenthood.core.agent.converse",
+                   AsyncMock(return_value="Sure -- which ticker?")) as conv:
+            result = await hood.chat("tell me a joke")
+        conv.assert_awaited_once()
+        assert result == "Sure -- which ticker?"
 
-    async def test_chat_error_result(self):
-        """Error dict triggers fallback via _extract_response."""
+    async def test_chat_routing_miss_answers_instead_of_reporting(self):
+        """A routing miss must produce an answer, never agentu's sentinel."""
         mock = _make_agent({"error": "No appropriate tool found"})
         hood = await _build_hood(mock)
-        result = await hood.chat("show my portfolio")
+        with patch("agenthood.core.agent.converse",
+                   AsyncMock(return_value="Hi! What can I look up for you?")):
+            result = await hood.chat("hi")
         mock.infer.assert_awaited_once()
-        # Fallback: "show my portfolio" has no tickers, so error passes through
-        assert "No appropriate tool found" in result
+        assert "No appropriate tool" not in result
+        assert "tool" not in result.lower()
+        assert result == "Hi! What can I look up for you?"
+
+    async def test_chat_greeting_does_not_call_a_tool(self):
+        """'hi' is not a ticker -- it must not trigger a quote lookup."""
+        mock = _make_agent({"error": "No appropriate tool found"})
+        hood = await _build_hood(mock)
+        hood._call_tool_direct = AsyncMock(
+            side_effect=AssertionError("must not call a tool for a greeting")
+        )
+        with patch("agenthood.core.agent.converse",
+                   AsyncMock(return_value="Hey there.")):
+            result = await hood.chat("hi")
+        assert result == "Hey there."
+
+    async def test_chat_converse_passes_history(self):
+        """The conversational path gets prior turns so it can follow context."""
+        mock = _make_agent({"error": "No appropriate tool found"})
+        hood = await _build_hood(mock)
+        hood._history = [("user", "AAPL"), ("assistant", "AAPL is $310")]
+        with patch("agenthood.core.agent.converse",
+                   AsyncMock(return_value="It closed at $310.")) as conv:
+            await hood.chat("what about it")
+        assert conv.await_args.kwargs["history"] == hood._history[:2] or \
+               conv.await_args.kwargs["history"][:2] == [
+                   ("user", "AAPL"), ("assistant", "AAPL is $310")]
+
+    async def test_chat_converse_failure_falls_back_to_scope(self):
+        """If the direct LLM call also fails, show a plain line -- no internals."""
+        mock = _make_agent({"error": "No appropriate tool found"})
+        hood = await _build_hood(mock)
+        with patch("agenthood.core.agent.converse", AsyncMock(return_value="")):
+            result = await hood.chat("hi")
+        assert "trading assistant" in result
+        assert "tool" not in result.lower()
+
+    async def test_chat_real_error_still_surfaces(self):
+        """Genuine failures are NOT swallowed."""
+        mock = _make_agent({"error": "429 rate limit exceeded"})
+        hood = await _build_hood(mock)
+        result = await hood.chat("what is my buying power")
+        assert "429" in result or "rate limit" in result.lower()
 
     async def test_chat_stores_history(self):
         """History is appended after each chat call."""
@@ -530,3 +578,180 @@ async def test_get_account_number_caches():
     assert num2 == "12345"
     fake_tool.assert_awaited_once()
 
+
+
+# ── Module decomposition regressions ──────────────────────────────────────────
+# These lock in behaviour that the split could silently break: path arithmetic
+# relative to __file__, and the back-compat re-export shims.
+
+def test_bundled_skills_are_discoverable():
+    """discover_skill_dirs() resolves paths relative to its own __file__.
+
+    Moving it to a different nesting depth silently returns [] -- the agent
+    then starts with no trading skills and no error.
+    """
+    from pathlib import Path
+    from agenthood.core.builder import discover_skill_dirs, BUNDLED_SKILLS
+    dirs = discover_skill_dirs()
+    assert len(dirs) == len(BUNDLED_SKILLS), f"expected all bundled skills, got {dirs}"
+    for d in dirs:
+        assert Path(d, "SKILL.md").exists()
+
+
+def test_agent_module_shim_reexports():
+    """agenthood.agent kept working after the move to agenthood.core."""
+    import agenthood
+    from agenthood.agent import (
+        AgentHood as ShimAgentHood,
+        SYSTEM_PROMPT as shim_prompt,
+        _extract_response as shim_extract,
+        _format_tool_result as shim_format,
+    )
+    from agenthood.core.agent import AgentHood as CoreAgentHood
+    from agenthood.core.prompts import SYSTEM_PROMPT as core_prompt
+
+    assert ShimAgentHood is CoreAgentHood is agenthood.AgentHood
+    assert shim_prompt is core_prompt
+    assert callable(shim_extract) and callable(shim_format)
+
+
+def test_extract_tickers_drops_stopwords():
+    """The failure-path ticker heuristic must not fire on ordinary questions."""
+    from agenthood.core.tickers import extract_tickers
+    assert extract_tickers("WHAT CAN YOU DO") == []
+    assert extract_tickers("price of AAPL") == ["AAPL"]
+    assert extract_tickers("AAPL NVDA MSFT TSLA GOOG AMZN", limit=5) == [
+        "AAPL", "NVDA", "MSFT", "TSLA", "GOOG"
+    ]
+
+
+def test_extract_tickers_is_case_sensitive_in_sentences():
+    """Regression: 'tell me a joke' answered with a quote for A (Agilent).
+
+    Upper-casing the whole message first turns ordinary words into symbols. In a
+    sentence, only words the user actually typed in caps may count.
+    """
+    from agenthood.core.tickers import extract_tickers
+    # Lowercase prose yields nothing, however ticker-shaped the words look
+    assert extract_tickers("tell me a joke") == []
+    assert extract_tickers("hey there") == []
+    assert extract_tickers("what is an etf") == []
+    # A bare word is a ticker in either case
+    assert extract_tickers("nvda") == ["NVDA"]
+    assert extract_tickers("NVDA") == ["NVDA"]
+    # Caps inside a sentence still resolve
+    assert extract_tickers("is TSLA overbought?") == ["TSLA"]
+    assert extract_tickers("show me AAPL and NVDA") == ["AAPL", "NVDA"]
+    # Pronoun "I" and finance jargon are not symbols
+    assert extract_tickers("I want to buy AAPL") == ["AAPL"]
+    assert extract_tickers("what is an ETF?") == []
+
+
+def test_system_prompt_forbids_tool_use_for_meta_questions():
+    """Regression: 'what can you do?' answered with a stale ticker quote.
+
+    get_equity_quotes is the only non-deferred tool, so the model reaches for it
+    and reuses a ticker from context. The prompt must rule that out explicitly.
+    """
+    from agenthood.core.prompts import SYSTEM_PROMPT
+    lowered = SYSTEM_PROMPT.lower()
+    assert "what can you do" in lowered
+    assert "never reuse a ticker" in lowered
+    assert "no tool." in lowered
+
+
+@pytest.mark.asyncio
+async def test_analyze_failure_does_not_route_through_tool_calling():
+    """Regression: a 429 on the analyze path produced quote spam.
+
+    llm_completion used to fall back to chat(), which sent the multi-KB market
+    data dump through tool selection. The router then quoted whatever symbols
+    appeared inside the JSON -- 'agenthood analyze MSFT' returned quotes for
+    MSFT, III and others with raw Rich markup.
+    """
+    from agenthood.core import llm
+
+    mock = _make_agent({"response": "should never be reached"})
+    hood = await _build_hood(mock)
+    hood.chat = AsyncMock(side_effect=AssertionError(
+        "analyze must not fall back to the tool-calling path"
+    ))
+
+    with patch.object(llm, "_completion",
+                      AsyncMock(return_value=("", "rate limited (429)", False))):
+        out = await hood._llm_completion("Analyze MSFT. Data: {...}")
+
+    assert "429" in out
+    assert "Could not generate the analysis" in out
+    hood.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_llm_completion_uses_model_fallbacks():
+    """A rate-limited primary should roll over to a configured fallback model."""
+    from agenthood.core import llm
+
+    mock = _make_agent({"response": "x"})
+    hood = await _build_hood(mock)
+    hood.config.model_fallbacks = ["nvidia/nemotron-3-super-120b-a12b:free"]
+
+    calls = []
+
+    async def fake(model, base, key, messages, **kw):
+        calls.append((model, base))
+        if len(calls) == 1:
+            return "", "rate limited (429)", False
+        return "Analysis text", None, False
+
+    with patch.object(llm, "_completion", fake):
+        out = await hood._llm_completion("Analyze MSFT.")
+
+    assert out == "Analysis text"
+    assert len(calls) == 2
+    # the fallback is an OpenRouter id, so it must be routed to OpenRouter
+    assert "openrouter.ai" in calls[1][1]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_text_is_last_resort():
+    """Chain-of-thought must not win over a real answer from a later model.
+
+    Thinking models leave `content` empty and put CoT in `reasoning`. Accepting
+    that immediately printed 'We need to produce a structured report...' instead
+    of the report.
+    """
+    from agenthood.core import llm
+
+    mock = _make_agent({"response": "x"})
+    hood = await _build_hood(mock)
+    hood.config.model_fallbacks = ["some/thinking-model:free", "other/clean-model:free"]
+
+    seq = [
+        ("", "rate limited (429)", False),      # primary: down
+        ("thinking out loud...", None, True),   # fallback 1: CoT only
+        ("## Real Analysis", None, False),      # fallback 2: actual answer
+    ]
+
+    async def fake(model, base, key, messages, **kw):
+        return seq.pop(0)
+
+    with patch.object(llm, "_completion", fake):
+        out = await hood._llm_completion("Analyze MSFT.")
+
+    assert out == "## Real Analysis"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_text_used_when_nothing_better():
+    """If every model returns only reasoning, show it rather than nothing."""
+    from agenthood.core import llm
+
+    mock = _make_agent({"response": "x"})
+    hood = await _build_hood(mock)
+    hood.config.model_fallbacks = []
+
+    with patch.object(llm, "_completion",
+                      AsyncMock(return_value=("salvaged text", None, True))):
+        out = await hood._llm_completion("Analyze MSFT.")
+
+    assert out == "salvaged text"

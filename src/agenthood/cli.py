@@ -126,6 +126,25 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def _print_rich(text) -> None:
+    """Print agent output with Rich markup and markdown actually rendered.
+
+    Agent output carries Rich tags ("[bold cyan]NVDA[/bold cyan]") and markdown
+    tables. Plain print() dumps the tags as literal text, so route through the
+    same renderer the TUI uses. Falls back to print() if Rich is unavailable.
+    """
+    txt = str(text)
+    try:
+        from rich.console import Console
+        from agenthood.tui.render import _render_with_code_blocks
+        # Force terminal colors if stdout supports color or environment requests it
+        Console(force_terminal=True).print(
+            _render_with_code_blocks(txt), highlight=False
+        )
+    except Exception:
+        print(txt)
+
+
 # ── Plain fallback REPL (--plain or non-TTY) ─────────────────────────────────
 
 async def plain_repl(agent: AgentHood) -> None:
@@ -260,7 +279,7 @@ async def main() -> None:
         async with AgentHood(cfg) as agent:
             for ticker in tickers:
                 result = await agent.analyze(ticker)
-                print(result)
+                _print_rich(result)
                 print()
         return
 
@@ -352,17 +371,7 @@ async def main() -> None:
                 if isinstance(response, dict):
                     print(response.get("error", str(response)))
                 else:
-                    try:
-                        from rich.console import Console
-                        # Force terminal colors if stdout supports color or environment requests it
-                        console = Console(force_terminal=True)
-                        txt_str = str(response)
-                        if "[" in txt_str and "]" in txt_str:
-                            console.print(txt_str, highlight=False)
-                        else:
-                            print(txt_str)
-                    except Exception:
-                        print(response)
+                    _print_rich(response)
             return
 
         # Determine session name

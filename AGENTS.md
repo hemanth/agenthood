@@ -17,15 +17,49 @@ of equities, options, technical analysis, and portfolio risk management.
 
 ## Architecture
 
+### Module layout
+```
+src/agenthood/
+  agent.py            back-compat shim -> core/ (import-only; see note below)
+  core/
+    agent.py          the AgentHood class: chat, analyze, lifecycle
+    builder.py        build_agent() -- all agentu wiring, MCP, skills, tools
+    llm.py            direct OpenAI-compatible HTTP client (bypasses agentu)
+    market_data.py    parallel MCP fetch + trim for analyze()
+    prompts.py        SYSTEM_PROMPT, analyst prompt, analyze template
+    response.py       _extract_response
+    formatting.py     _format_tool_result (raw JSON -> markdown)
+    tickers.py        failure-path ticker extraction + stopwords
+    facade.py         thin agentu passthroughs (memory, ralph, serve, eval)
+  tui/
+    repl.py           the REPL loop
+    commands.py       handle_meta -- dot-command dispatch
+    actions.py        bodies for .portfolio/.positions/.quote/.analyze
+    watch.py          WatchController -- in-REPL price watchers
+    render.py         banner, response panels, help, status bar
+    models.py         model catalogue, picker, hot-swap
+    input.py          readline setup, completion, read_input
+    theme.py          console + colour tokens
+    thinking.py       ThinkingDisplay spinner panel
+    format.py         _format_mcp_response (MCP JSON -> markdown tables)
+    sessions.py       saved session files
+    tickers.py        company name -> ticker resolution
+```
+
+**Patch targets:** `agenthood.agent` and `agenthood.tui` re-export for imports
+only. `mock.patch` must target where a name is *used* -- e.g.
+`agenthood.core.builder.Agent`, not `agenthood.agent.Agent`. Patching the shim
+silently does nothing.
+
 ### Dispatch pipeline (order matters)
-`_direct_dispatch` in agent.py processes user input in this order:
+`_direct_dispatch` in core/agent.py processes user input in this order:
 1. **Watch/alert detection** -- regex match, returns `__watch__` sentinel
 2. **Everything else** -- goes to LLM via `agent.infer()` with search_tools()
 
 The LLM handles all intent parsing: greetings, stock queries, recommendations,
 meta questions, ticker resolution, company name lookup. No hardcoded NL patterns.
 
-### TUI command dispatch (handle_meta in tui.py)
+### TUI command dispatch (handle_meta in tui/commands.py)
 Dot commands are handled BEFORE the agent's dispatch pipeline:
 - `.analyze TICKER [, TICKER2]` -- returns list of tickers
 - `.portfolio` / `.port` / `.p` -- returns `__portfolio__` sentinel
@@ -62,8 +96,18 @@ Dot commands are handled BEFORE the agent's dispatch pipeline:
 - Keep streaming progress clean: show step labels, not character counts.
 
 ## Testing rules
-- Run `python3.14 -m pytest tests/test_tui.py` for TUI changes.
+- Run `python3 -m pytest tests/ -q` -- the full suite is ~210 tests in under a
+  second, fully mocked and offline. Run all of it; there is no reason not to.
+- Run `python3 -m pytest tests/test_tui.py` for a quick TUI-only check.
 - Test dispatch detection with inline scripts before declaring it works.
-- Clear `__pycache__` after edits: the CLI uses editable install.
-- The full test suite (`tests/`) has 200+ tests; some mock agentu and may hang.
-  Run specific test files instead of the full suite for fast feedback.
+- Clear `__pycache__` after edits.
+- **The `agenthood` on PATH is NOT this repo.** It is a copied (non-editable)
+  install, so it keeps running old code after you edit `src/`. To exercise your
+  changes, run from the repo:
+  ```
+  PYTHONPATH=src python3 -c "import sys; sys.argv=['agenthood','NVDA']; \
+      from agenthood.cli import cli; cli()"
+  ```
+  Reinstall with `pip install -e .` if you want the PATH binary to track the repo.
+- Check `dry_run` in `~/.agenthood/config.json` before any manual run. When it is
+  `false` the agent can place real orders -- stick to quotes, `.p`, and `.pos`.
