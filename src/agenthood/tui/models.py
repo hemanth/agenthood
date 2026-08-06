@@ -10,7 +10,7 @@ from rich.table import Table
 
 from .theme import (
     C_ACCENT, C_DIM, C_DIMMER, C_FG, C_GREEN, C_LABEL, C_WARN,
-    _PROVIDER_COL, _SPEED_COL, console,
+    PROMPT_MAIN, _PROVIDER_COL, _SPEED_COL, console,
 )
 
 # ── Curated model catalogue ───────────────────────────────────────────────────
@@ -79,7 +79,7 @@ def show_model_picker(current: str) -> Optional[str]:
     ))
 
     try:
-        raw = input("\x1b[38;5;75m❯\x1b[0m  ").strip()
+        raw = input(PROMPT_MAIN).strip()
     except (EOFError, KeyboardInterrupt):
         console.print(f"  [{C_DIM}]cancelled[/{C_DIM}]")
         return None

@@ -5,6 +5,7 @@ import readline
 
 from ..config import DATA_DIR as _DATA_DIR
 from .models import MODELS
+from .theme import PROMPT_CONT, PROMPT_MAIN
 
 _HIST_FILE = _DATA_DIR / "history"
 
@@ -153,10 +154,6 @@ def _add_history(line: str) -> None:
     readline.add_history(s)
 
 
-PROMPT_MAIN = "\n\x1b[38;5;75m❯\x1b[0m  "   # bright blue chevron, agy-style
-PROMPT_CONT = "  \x1b[90m·\x1b[0m  "         # dim dot for continuation lines
-
-
 def read_input() -> str:
     """Read one logical line from stdin.
 
@@ -166,7 +163,13 @@ def read_input() -> str:
     """
     lines: list[str] = []
     while True:
-        prompt = PROMPT_MAIN if not lines else PROMPT_CONT
+        if lines:
+            prompt = PROMPT_CONT
+        else:
+            # Printed rather than embedded in the prompt: a newline inside the
+            # prompt string throws off readline's cursor arithmetic.
+            print()
+            prompt = PROMPT_MAIN
         try:
             chunk = input(prompt)
         except (EOFError, KeyboardInterrupt):
