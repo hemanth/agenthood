@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio, json, logging, smtplib
 from abc import ABC, abstractmethod
 from email.message import EmailMessage
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +73,17 @@ class WebhookNotifier(Notifier):
         if parsed.scheme not in ('https', 'http'):
             logger.warning('Webhook blocked: unsupported scheme %s', parsed.scheme)
             return False
+        host = parsed.hostname or ''
         try:
-            ip = ipaddress.ip_address(socket.gethostbyname(parsed.hostname or ''))
-            if ip.is_private or ip.is_loopback or ip.is_link_local:
-                logger.warning('Webhook blocked: private/loopback target')
-                return False
-        except (socket.gaierror, ValueError):
-            pass  # unresolvable host -- let aiohttp handle the error
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            try:
+                ip = ipaddress.ip_address(socket.gethostbyname(host))
+            except (socket.gaierror, ValueError):
+                return True  # unresolvable host -- let aiohttp handle the error
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            logger.warning('Webhook blocked: private/loopback target')
+            return False
         return True
 
     async def send(self, title: str, body: str) -> None:

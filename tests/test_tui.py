@@ -283,3 +283,15 @@ class TestUpdateCommand:
         cmd = _pip_command()
         assert cmd[:5] == [sys.executable, "-m", "pip", "install", "--upgrade"]
         assert "agenthood" in cmd
+
+
+def test_apply_model_switch_resets_cooldowns():
+    from agenthood.core import llm
+    from agenthood.tui.models import apply_model_switch
+
+    llm._set_cooldown("meta-llama/llama-3.3-70b-instruct:free", 300)
+    assert llm._cooling_down("meta-llama/llama-3.3-70b-instruct:free") > 0
+
+    mock_agent = MagicMock()
+    apply_model_switch(mock_agent, "openai/gpt-4o")
+    assert llm._cooling_down("meta-llama/llama-3.3-70b-instruct:free") == 0

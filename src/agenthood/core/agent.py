@@ -153,7 +153,11 @@ class AgentHood(AgentuFacade):
             return tool.function(**params)
 
     async def _get_account_number(self) -> str:
-        """Fetch the primary account number (cached after first call)."""
+        """Fetch the primary account number (cached after first call).
+
+        Preference order, per AGENTS.md: the agentic account, then the default
+        account, then whatever came first.
+        """
         if self._account_number:
             return self._account_number
         import json as _j
@@ -162,7 +166,19 @@ class AgentHood(AgentuFacade):
         accounts = (data.get("data") or {}).get("accounts") or data.get("accounts") or []
         if not accounts:
             raise ValueError("No accounts found")
-        acct = accounts[0].get("account_number") or accounts[0].get("id")
+        chosen = None
+        for a in accounts:
+            if a.get("agentic_allowed"):
+                chosen = a
+                break
+        if chosen is None:
+            for a in accounts:
+                if a.get("is_default"):
+                    chosen = a
+                    break
+        if chosen is None:
+            chosen = accounts[0]
+        acct = chosen.get("account_number") or chosen.get("id") or ""
         self._account_number = acct
         return acct
 

@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agenthood"
-version = "0.3.3"
+version = "0.3.4"
 description = "Robinhood trading agent powered by agentu + Robinhood MCP"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
     "agentu>=2.4.0",
+    "httpx>=0.27",
     "rich>=13.0",
 ]
 

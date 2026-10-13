@@ -8,7 +8,6 @@ import time
 import uuid
 import sys
 import os
-import pathlib
 import subprocess
 from contextlib import contextmanager
 
@@ -220,7 +219,7 @@ async def main() -> None:
     try:
         from agenthood import AgentHood, load_config
         from agenthood.notify import build_notifiers, notify_all
-        from agenthood.watcher import PriceWatcher
+        from agenthood.watcher import PriceWatcher, extract_quote_price
 
         # Pre-initialize the SQLite schema before any concurrent tasks
         _get_db().close()
@@ -230,40 +229,15 @@ async def main() -> None:
         async with AgentHood(cfg) as agent:
 
             async def _watcher_price_fn(ticker: str) -> float:
-                import re as _re
-                import json as _json
-                try:
-                    raw = await agent._call_tool_direct(
-                        "robinhood_get_equity_quotes",
-                        {"symbols": [ticker.upper()]},
-                    )
-                    txt = str(raw)
-                    try:
-                        data = _json.loads(txt)
-                        for key in ("last_trade_price", "bid_price",
-                                    "ask_price", "price"):
-                            v = data.get(key)
-                            if v is not None:
-                                return float(v)
-                    except Exception:
-                        pass
-                    m = _re.search(
-                        r'"?(?:price|last|bid)[":]?\s*"?'
-                        r'(\d[\d,]*\.?\d*)"?', txt, _re.I,
-                    )
-                    if m:
-                        return float(m.group(1).replace(",", ""))
-                    m = _re.search(r'\$(\d[\d,]*(?:\.\d+)?)', txt)
-                    if m:
-                        return float(m.group(1).replace(",", ""))
-                except Exception:
-                    pass
-                result = await agent.chat(ticker)
-                m = _re.search(r'\$(\d[\d,]*(?:\.\d+)?)', str(result))
-                if m:
-                    return float(m.group(1).replace(",", ""))
+                raw = await agent._call_tool_direct(
+                    "robinhood_get_equity_quotes",
+                    {"symbols": [ticker.upper()]},
+                )
+                price = extract_quote_price(raw)
+                if price is not None:
+                    return price
                 raise ValueError(
-                    f"Cannot parse price for {ticker} from: {result!r}"
+                    f"Cannot parse price for {ticker} from: {str(raw)[:200]!r}"
                 )
 
             active_tasks: dict[str, asyncio.Task] = {}

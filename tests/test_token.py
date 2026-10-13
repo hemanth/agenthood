@@ -44,3 +44,24 @@ def test_find_token_file(mock_path):
     
     res = _find_token_file()
     assert res == mock_token_file
+
+
+def test_do_refresh_returns_new_access_token(tmp_path):
+    """Regression: _do_refresh fell off the end returning None, so get_valid_token
+    returned the old expired token via `self._do_refresh() or access_token`."""
+    from agenthood.token import TokenManager
+
+    token_file = tmp_path / "rh_tokens.json"
+    expired_payload = base64.urlsafe_b64encode(json.dumps({"exp": 1000}).encode()).decode().rstrip("=")
+    expired_jwt = f"h.{expired_payload}.s"
+
+    tm = TokenManager()
+    tm._token_file = token_file
+    tm._tokens = {"access_token": expired_jwt, "refresh_token": "ref-123"}
+    tm._client_id = "client-abc"
+
+    with patch("agenthood.token._refresh_token", return_value={"access_token": "fresh-jwt-token"}):
+        tok = tm.get_valid_token()
+
+    assert tok == "fresh-jwt-token"
+    assert json.loads(token_file.read_text())["access_token"] == "fresh-jwt-token"

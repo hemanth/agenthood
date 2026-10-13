@@ -33,7 +33,7 @@ def _strip_emoji(s: str) -> str:
 # ── Banner ────────────────────────────────────────────────────────────────────
 
 def print_banner(model: str, dry_run: bool, max_order: float,
-                 token_info: str, session_name: Optional[str]) -> None:
+                 token_info: str = "", session_name: Optional[str] = None) -> None:
     """Clean Rich Panel banner — sharp, minimal, no ASCII art."""
     mode_label = "dry-run" if dry_run else "live"
     mode_color = C_TRADE_L if dry_run else C_TRADE_R

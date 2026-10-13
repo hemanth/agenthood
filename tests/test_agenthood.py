@@ -886,3 +886,42 @@ class TestRetryAfterHandling:
         assert llm._cooling_down("x") > 0
         llm.reset_cooldowns()
         assert llm._cooling_down("x") == 0
+
+
+# ── Account priority, Groq key validation, and setup_llm regressions ─────────
+
+@pytest.mark.asyncio
+async def test_get_account_number_prefers_agentic_then_default():
+    mock = _make_agent({})
+    hood = await _build_hood(mock)
+    hood._call_tool_direct = AsyncMock(return_value={
+        "data": {
+            "accounts": [
+                {"account_number": "FIRST", "is_default": True, "agentic_allowed": False},
+                {"account_number": "AGENTIC", "is_default": False, "agentic_allowed": True},
+            ]
+        }
+    })
+    assert await hood._get_account_number() == "AGENTIC"
+
+
+def test_check_api_key_rejects_groq_without_key():
+    from agenthood.config import AgentHoodConfig
+    from agenthood.core.builder import _check_api_key
+
+    cfg = AgentHoodConfig(api_base="https://api.groq.com/openai/v1", api_key="")
+    with pytest.raises(RuntimeError, match="No API key"):
+        _check_api_key(cfg)
+
+
+def test_setup_llm_openrouter_save_key_does_not_raise_name_error(monkeypatch):
+    """Regression: setup_llm assigned to undefined cfg['api_key'] instead of result['api_key']."""
+    from agenthood import setup as S
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-123")
+    answers = iter(["y", "1", "y"])  # use env -> model #1 -> save key = y
+    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
+
+    out = S.setup_llm()
+    assert out["api_key"] == "sk-or-test-123"
+    assert out["api_base"] == "https://openrouter.ai/api/v1"

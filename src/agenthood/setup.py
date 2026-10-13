@@ -1,7 +1,6 @@
 """agenthood setup wizard — interactive first-run configuration."""
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess
@@ -141,7 +140,7 @@ def setup_llm() -> dict:
             }
             save_key = _ask("  Save API key to config? (y/n)", "n").lower()
             if save_key == "y":
-                cfg["api_key"] = os.environ["OPENROUTER_API_KEY"]
+                result["api_key"] = os.environ["OPENROUTER_API_KEY"]
                 _print("  Key will be saved to ~/.agenthood/config.json.", "dim")
             else:
                 _print("  Key stays in env only (export OPENROUTER_API_KEY=...).", "dim")

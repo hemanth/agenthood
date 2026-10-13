@@ -72,7 +72,7 @@ def discover_skill_dirs() -> list[str]:
 
 def _check_api_key(cfg: Any) -> None:
     """Fast-fail: detect missing API key for cloud LLM providers."""
-    _cloud_hosts = ("openai.com", "openrouter.ai", "anthropic.com", "googleapis.com")
+    _cloud_hosts = ("openai.com", "openrouter.ai", "anthropic.com", "googleapis.com", "groq.com")
     if any(h in (cfg.api_base or "") for h in _cloud_hosts) and not cfg.api_key:
         raise RuntimeError(
             "No API key configured for cloud LLM.\n"
@@ -84,8 +84,9 @@ def _check_api_key(cfg: Any) -> None:
 
 def _write_rules(agent: Agent) -> Path:
     """with_rules() needs a file path, so write the system prompt to a temp file."""
-    rules_tmp = Path(tempfile.mktemp(suffix=".md"))
-    rules_tmp.write_text(SYSTEM_PROMPT)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write(SYSTEM_PROMPT)
+        rules_tmp = Path(f.name)
     agent.with_rules(str(rules_tmp))
     return rules_tmp
 

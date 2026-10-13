@@ -288,3 +288,12 @@ def test_webhook_ssrf_allows_public(mock_gethost):
     n = WebhookNotifier('http://example.com/x')
     assert n._validate_url() is True
 
+def test_webhook_ssrf_blocks_ipv6_loopback():
+    n = WebhookNotifier('http://[::1]/x')
+    assert n._validate_url() is False
+
+def test_notifier_type_hints_resolve():
+    from typing import get_type_hints
+    assert get_type_hints(NtfyNotifier.__init__)
+    assert get_type_hints(WebhookNotifier.__init__)
+

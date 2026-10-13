@@ -57,7 +57,6 @@ def _format_tool_result(tool_name: str, raw_json: str) -> str | None:
             prev = float(q.get("adjusted_previous_close", 0) or 0)
             chg = cur - prev if prev else 0
             pct = (chg / prev * 100) if prev else 0
-            arrow = "^" if chg >= 0 else "v"
             sign = "+" if chg >= 0 else ""
             bid = q.get("bid_price")
             ask = q.get("ask_price")

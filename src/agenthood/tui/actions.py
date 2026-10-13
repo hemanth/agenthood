@@ -5,9 +5,9 @@ render (or None when it already reported an error through *td*).
 """
 from __future__ import annotations
 
+import inspect
 import json
 import time
-from typing import Optional
 
 from rich.markup import escape
 
@@ -19,14 +19,16 @@ from .tickers import _resolve_ticker
 
 
 async def pick_account_number(agent) -> str:
-    """Return the account number to operate on.
-
-    Preference order, per AGENTS.md: the agentic account, then the default
-    account, then whatever came first.
-    """
+    """Return the account number to operate on (cached on agent when available)."""
+    getter = getattr(agent, "_get_account_number", None)
+    if inspect.iscoroutinefunction(getter):
+        try:
+            return await getter()
+        except ValueError:
+            return ""
     acct_raw = await agent._call_tool_direct("robinhood_get_accounts", {})
     acct_data = json.loads(acct_raw) if isinstance(acct_raw, str) else acct_raw
-    accounts = acct_data.get("data", {}).get("accounts", [])
+    accounts = (acct_data.get("data") or {}).get("accounts") or acct_data.get("accounts") or []
 
     for a in accounts:
         if a.get("agentic_allowed"):

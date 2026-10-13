@@ -134,6 +134,8 @@ def _resolve_model(arg: str) -> Optional[str]:
 def apply_model_switch(agent, new_model: str) -> None:
     """Hot-swap LLM model on running agent (no restart needed)."""
     try:
+        from ..core.llm import reset_cooldowns
+        reset_cooldowns()
         if agent._agent is not None:
             agent._agent.model = new_model
         agent.config.model = new_model

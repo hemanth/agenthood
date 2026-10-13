@@ -55,10 +55,7 @@ def _report_daemon_triggers() -> None:
 
 async def tui_repl(agent, session_name: Optional[str] = None) -> None:
     """Main TUI REPL.  Call with optional session_name to persist context."""
-    from ..token import token_status
-
     cfg = agent.config
-    tok = token_status()
 
     # Load session memory if continuing
     sess_file = session_path(session_name) if session_name else None
@@ -70,7 +67,6 @@ async def tui_repl(agent, session_name: Optional[str] = None) -> None:
         model=cfg.model or "auto",
         dry_run=cfg.dry_run,
         max_order=cfg.max_order_value,
-        token_info=tok,
         session_name=session_name,
     )
 

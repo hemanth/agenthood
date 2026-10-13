@@ -172,6 +172,7 @@ class TokenManager:
                 logger.info("✅ Token refreshed and saved to %s", self._token_file)
             except Exception as e:
                 logger.warning("Could not save refreshed token: %s", e)
+        return new_tokens["access_token"]
 
     def get_valid_token(self) -> str:
         """Return a valid access token, refreshing synchronously if needed."""
