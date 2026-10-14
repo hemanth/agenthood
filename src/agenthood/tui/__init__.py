@@ -32,7 +32,7 @@ Layout:
 """
 from .commands import handle_meta
 from .format import _format_mcp_response
-from .input import save_readline, setup_readline
+from .input import save_readline, set_completion_context, setup_readline
 from .models import MODELS, _resolve_model, _short_model, apply_model_switch, show_model_picker
 from .render import _strip_emoji, print_banner, print_help, render_response
 from .repl import tui_repl
@@ -53,6 +53,7 @@ __all__ = [
     "render_response",
     "save_readline",
     "session_path",
+    "set_completion_context",
     "setup_readline",
     "show_model_picker",
     "tui_repl",

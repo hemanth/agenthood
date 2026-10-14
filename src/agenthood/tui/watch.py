@@ -6,8 +6,8 @@ import sys
 
 from rich.markup import escape
 
-from ..watcher import extract_quote_price
-from .render import _strip_emoji, render_response
+from ..watcher import PriceWatcher, extract_quote_price
+from .render import _show_table, _strip_emoji, render_response
 from .theme import C_DIM, C_ERR, C_WARN, console
 
 
@@ -17,7 +17,15 @@ class WatchController:
     def __init__(self, agent):
         self._agent = agent
         self._tasks: list[asyncio.Task] = []
+        self._watchers: list[PriceWatcher] = []
         self._queue: asyncio.Queue = asyncio.Queue()
+
+    @property
+    def active_count(self) -> int:
+        return sum(
+            1 for w, t in zip(self._watchers, self._tasks)
+            if not w.cancelled and not w.triggered and not t.done()
+        )
 
     # -- price source ---------------------------------------------------------
 
@@ -38,7 +46,6 @@ class WatchController:
 
     def start(self, spec: dict) -> None:
         """Spawn a background watcher from a parsed watch spec."""
-        from ..watcher import PriceWatcher
         w = PriceWatcher(
             ticker     = spec["ticker"],
             threshold  = spec["threshold"],
@@ -49,6 +56,7 @@ class WatchController:
             get_price  = self._price_fn,
             on_trigger = self._on_trigger,
         )
+        self._watchers.append(w)
         self._tasks.append(asyncio.create_task(w.run()))
         dir_word   = "below" if w.direction == "below" else "above"
         action_str = (
@@ -57,12 +65,37 @@ class WatchController:
             else f"{w.action} {w.shares} shares"
         )
         render_response(
-            f"Watching {w.ticker} — will {action_str} when price goes "
+            f"Watching {w.ticker} -- will {action_str} when price goes "
             f"{dir_word} ${w.threshold:,.2f}.  Polling every {w.interval}s.",
             0.0,
         )
 
+    def show_watches(self) -> None:
+        """Display active in-REPL and daemon watches."""
+        from ..daemon import list_watches
+        rows: dict[str, str] = {}
+        idx = 0
+        for w, t in zip(self._watchers, self._tasks):
+            if not w.cancelled and not w.triggered and not t.done():
+                idx += 1
+                rows[f"repl #{idx}"] = f"{w.label} (every {w.interval}s)"
+        for dw in list_watches():
+            wid = dw.get("id", "?")
+            act = dw.get("action", "alert")
+            sh = dw.get("shares", 0)
+            sym = dw.get("ticker", "?")
+            direction = dw.get("direction", "below")
+            thresh = dw.get("threshold", 0)
+            act_str = "alert" if act == "alert" else f"{act} {sh}"
+            rows[f"daemon #{wid}"] = f"{act_str} {sym} when {direction} ${float(thresh):,.2f}"
+        if not rows:
+            console.print(f"  [{C_DIM}]No active watches. Example: watch NVDA below $180[/{C_DIM}]")
+            return
+        _show_table(rows, "active watches")
+
     def cancel_all(self) -> None:
+        for w in self._watchers:
+            w.cancelled = True
         for t in self._tasks:
             t.cancel()
 
@@ -75,7 +108,7 @@ class WatchController:
                 w_obj, w_price = self._queue.get_nowait()
                 # print notification above current line
                 sys.stdout.write('\n')
-                sys.stdout.write(f'  ⚡ WATCHER: {w_obj.ticker} hit ${w_price:,.2f}\n')
+                sys.stdout.write(f'  [!] WATCHER: {w_obj.ticker} hit ${w_price:,.2f}\n')
                 sys.stdout.flush()
             except asyncio.QueueEmpty:
                 pass
@@ -102,7 +135,7 @@ class WatchController:
             console.print(
                 f"  [{C_DIM}]  Proposed: "
                 f"{w_obj.action} {w_obj.shares} {w_obj.ticker} "
-                f"— confirm? (yes / no)[/{C_DIM}]"
+                f"-- confirm? (yes / no)[/{C_DIM}]"
             )
             try:
                 confirm = input("  confirm> ").strip().lower()
@@ -115,7 +148,7 @@ class WatchController:
             # Route through agent safety review
             order_prompt = (
                 f"{w_obj.action} {w_obj.shares} {w_obj.ticker} "
-                f"at market — triggered by price watcher"
+                f"at market -- triggered by price watcher"
             )
             console.print(f"  [{C_DIM}]routing through safety review...[/{C_DIM}]")
             try:
@@ -124,3 +157,4 @@ class WatchController:
                 render_response(_strip_emoji(str(resp)), 0.0)
             except Exception as w_exc:
                 console.print(f"  [{C_ERR}]Order error: {escape(str(w_exc))}[/{C_ERR}]")
+

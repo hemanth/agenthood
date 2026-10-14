@@ -8,13 +8,13 @@ from typing import Optional
 
 from rich.markup import escape
 
-from .actions import run_account_view, run_analyze, run_quote
+from .actions import run_account_view, run_analyze, run_discovery, run_quote, run_risk
 from .commands import handle_meta
 from .input import read_input, save_readline, setup_readline
 from .render import (
     _print_status, _strip_emoji, print_banner, print_help, render_response,
 )
-from .sessions import session_path
+from .sessions import load_session_state, save_session_state, session_path
 from .theme import C_DIM, C_DIMMER, C_ERR, C_LABEL, C_WARN, console
 from .thinking import ThinkingDisplay
 from .update import run_update
@@ -30,13 +30,8 @@ async def _read_input_async() -> str:
     return await loop.run_in_executor(None, read_input)
 
 
-def _save_session(sess_file, session_name: str, turn: int, model: str) -> None:
-    sess_file.parent.mkdir(parents=True, exist_ok=True)
-    sess_file.write_text(json.dumps({
-        "name":  session_name,
-        "turns": turn,
-        "model": model,
-    }, indent=2))
+def _save_session(sess_file, session_name: str, turn: int, agent) -> None:
+    save_session_state(sess_file, session_name, turn, agent)
     console.print(f"  [{C_DIMMER}]session saved: {session_name}[/{C_DIMMER}]")
 
 
@@ -58,9 +53,14 @@ async def tui_repl(agent, session_name: Optional[str] = None) -> None:
     cfg = agent.config
 
     # Load session memory if continuing
+    turn = 0
     sess_file = session_path(session_name) if session_name else None
     if sess_file and sess_file.exists():
-        console.print(f"  [{C_DIM}]continuing session {session_name!r}[/{C_DIM}]")
+        turn = load_session_state(sess_file, agent)
+        console.print(
+            f"  [{C_DIM}]continuing session {session_name!r} "
+            f"({turn} prior turn{'s' if turn != 1 else ''})[/{C_DIM}]"
+        )
 
     setup_readline()
     print_banner(
@@ -70,7 +70,6 @@ async def tui_repl(agent, session_name: Optional[str] = None) -> None:
         session_name=session_name,
     )
 
-    turn           = 0
     verbose        = False
     total_cost_usd = 0.0
     _last_interrupt = 0.0   # timestamp of most recent Ctrl+C
@@ -125,34 +124,60 @@ async def tui_repl(agent, session_name: Optional[str] = None) -> None:
             # ── Dot-commands ──────────────────────────────────────────────────
             meta_result = handle_meta(user_input, agent)
             if meta_result is True:
-                _print_status(agent, turn, total_cost_usd)
+                _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
+                continue
+
+            # .watches
+            if meta_result == "__watches__":
+                watches.show_watches()
+                _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
+                continue
+
+            # .watch TICKER below|above PRICE
+            if isinstance(meta_result, dict) and "__watch__" in meta_result:
+                watches.start(meta_result["__watch__"])
+                _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
                 continue
 
             # .update -- self-upgrade from PyPI
             if meta_result == "__update__":
                 await run_update()
-                _print_status(agent, turn, total_cost_usd)
+                _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
+                continue
+
+            # .trending / .movers -- direct watchlist + quotes discovery
+            if meta_result in ("__trending__", "__movers__"):
+                turn += 1
+                await run_discovery(agent, meta_result)
+                _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
                 continue
 
             # .portfolio / .positions -- direct MCP calls
             if isinstance(meta_result, str) and meta_result.startswith("__"):
                 turn += 1
                 await run_account_view(agent, meta_result)
-                _print_status(agent, turn, total_cost_usd)
+                _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
+                continue
+
+            # .risk TICKER [STOP] -- direct position sizing & risk calculator
+            if isinstance(meta_result, tuple) and meta_result[0] == "__risk__":
+                turn += 1
+                await run_risk(agent, meta_result[1], meta_result[2])
+                _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
                 continue
 
             # .quote TICKER -- direct MCP call
             if isinstance(meta_result, tuple) and meta_result[0] == "__quote__":
                 turn += 1
                 await run_quote(agent, meta_result[1])
-                _print_status(agent, turn, total_cost_usd)
+                _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
                 continue
 
             # .analyze TICKER [, TICKER2, ...]
             if isinstance(meta_result, list):
                 turn += 1
                 await run_analyze(agent, meta_result)
-                _print_status(agent, turn, total_cost_usd)
+                _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
                 continue
 
             # ── Thinking + inference ──────────────────────────────────────────
@@ -160,6 +185,16 @@ async def tui_repl(agent, session_name: Optional[str] = None) -> None:
             t0       = time.monotonic()
             response = None
             error    = None
+
+            if cfg.stream:
+                console.print()
+                console.print(f"  [{C_LABEL}]agenthood >[/{C_LABEL}]  ", end="")
+                try:
+                    await agent.stream(user_input)
+                except Exception as exc:
+                    console.print(f"\n  [{C_ERR}]! {escape(str(exc))}[/{C_ERR}]")
+                _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
+                continue
 
             async with ThinkingDisplay(console) as td:
                 td.step("routing query...")
@@ -209,16 +244,12 @@ async def tui_repl(agent, session_name: Optional[str] = None) -> None:
                     )
                 else:
                     render_response(_strip_emoji(str(response)), elapsed)
-            elif cfg.stream:
-                console.print(f"  [{C_LABEL}]agenthood >[/{C_LABEL}]  ", end="")
-                try:
-                    await agent.stream(user_input)
-                except Exception as exc:
-                    console.print(f"\n  [{C_ERR}]! {escape(str(exc))}[/{C_ERR}]")
+
+            _print_status(agent, turn, total_cost_usd, active_watches=watches.active_count)
 
     finally:
         # Always save history and session
         save_readline()
         if sess_file and session_name:
-            # Persist session name (agentu session data lives in agent internals)
-            _save_session(sess_file, session_name, turn, cfg.model)
+            _save_session(sess_file, session_name, turn, agent)
+

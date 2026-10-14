@@ -25,8 +25,44 @@ def test_handle_meta_analyze_resolves_names():
 def test_handle_meta_analyze_no_ticker():
     mock_agent = MagicMock()
     mock_agent.config.model = 'test'
+    mock_agent.last_ticker = None
     res = handle_meta('.analyze', mock_agent)
     assert res is True
+
+def test_handle_meta_analyze_shorthand_and_context():
+    mock_agent = MagicMock()
+    mock_agent.config.model = 'test'
+    mock_agent.last_ticker = 'AAPL'
+    assert handle_meta('.a NVDA', mock_agent) == ['NVDA']
+    assert handle_meta('.analyze', mock_agent) == ['AAPL']
+    assert handle_meta('.a', mock_agent) == ['AAPL']
+
+def test_handle_meta_quote_bare_and_context():
+    mock_agent = MagicMock()
+    mock_agent.config.model = 'test'
+    mock_agent.last_ticker = None
+    # Bare .q without last_ticker prints usage and returns True (never leaks to LLM)
+    assert handle_meta('.q', mock_agent) is True
+    # Bare .q with last_ticker quotes that ticker
+    mock_agent.last_ticker = 'NVDA'
+    assert handle_meta('.q', mock_agent) == ('__quote__', 'NVDA')
+    assert handle_meta('.quote', mock_agent) == ('__quote__', 'NVDA')
+
+def test_handle_meta_watches_history_status():
+    mock_agent = MagicMock()
+    mock_agent.config.model = 'test'
+    mock_agent._history = [('user', 'NVDA'), ('assistant', 'NVDA is $219')]
+    mock_agent.last_ticker = 'NVDA'
+    assert handle_meta('.watches', mock_agent) == '__watches__'
+    assert handle_meta('.history', mock_agent) is True
+    assert handle_meta('.status', mock_agent) is True
+
+def test_handle_meta_unknown_dot_command_caught_locally():
+    mock_agent = MagicMock()
+    mock_agent.config.model = 'test'
+    # Typos starting with '.' are handled locally (return True), never sent to LLM
+    assert handle_meta('.portfolo', mock_agent) is True
+    assert handle_meta('.nonexistent', mock_agent) is True
 
 def test_handle_meta_cost():
     mock_agent = MagicMock()
@@ -295,3 +331,291 @@ def test_apply_model_switch_resets_cooldowns():
     mock_agent = MagicMock()
     apply_model_switch(mock_agent, "openai/gpt-4o")
     assert llm._cooling_down("meta-llama/llama-3.3-70b-instruct:free") == 0
+
+
+def test_session_save_and_load_preserves_history(tmp_path, monkeypatch):
+    from agenthood.tui import sessions as S
+    monkeypatch.setattr(S, "_SESS_DIR", tmp_path)
+
+    mock_agent = MagicMock()
+    mock_agent._history = [("user", "NVDA"), ("assistant", "NVDA is $219")]
+    mock_agent._recent_tickers = ["NVDA"]
+    mock_agent.config.model = "gpt-4o"
+
+    sess_file = S.session_path("alpha")
+    S.save_session_state(sess_file, "alpha", 1, mock_agent)
+
+    fresh_agent = MagicMock()
+    fresh_agent._history = []
+    fresh_agent._recent_tickers = []
+    restored_turns = S.load_session_state(sess_file, fresh_agent)
+
+    assert restored_turns == 1
+    assert fresh_agent._history == [("user", "NVDA"), ("assistant", "NVDA is $219")]
+    assert fresh_agent._recent_tickers == ["NVDA"]
+
+
+@pytest.mark.asyncio
+async def test_run_quote_resolves_name_and_records_turn():
+    from unittest.mock import AsyncMock
+    from agenthood.tui.actions import run_quote
+
+    mock_agent = MagicMock()
+    mock_agent._call_tool_direct = AsyncMock(return_value={
+        "data": {"results": [{"quote": {"symbol": "NVDA", "last_trade_price": "219.50", "previous_close": "215.00"}}]}
+    })
+    mock_agent.record_turn = MagicMock()
+
+    await run_quote(mock_agent, "NVIDIA")
+    mock_agent._call_tool_direct.assert_awaited_once_with(
+        "robinhood_get_equity_quotes", {"symbols": ["NVDA"]}
+    )
+    mock_agent.record_turn.assert_called_once()
+    args, kwargs = mock_agent.record_turn.call_args
+    assert "NVDA" in args[1]
+    assert kwargs.get("tickers") == ["NVDA"]
+
+
+# ── Slice 3: UI/UX & Markdown Rendering TDD tests ─────────────────────────────
+
+class TestUIUXAndFormatting:
+
+    def test_render_with_code_blocks_detects_tables_lists_bold_and_headers(self):
+        from rich.markdown import Markdown
+        from agenthood.tui.render import _render_with_code_blocks
+
+        # Table with wide separator (like core/formatting.py produces)
+        t1 = "| Symbol | Name |\n|--------|------|\n| **AAPL** | Apple |"
+        assert isinstance(_render_with_code_blocks(t1), Markdown)
+
+        # Bullet list with bold text
+        t2 = "- **Price**: $219.50\n- **Verdict**: BUY"
+        assert isinstance(_render_with_code_blocks(t2), Markdown)
+
+        # H3 heading
+        t3 = "### Key Risks\n Valuation is elevated."
+        assert isinstance(_render_with_code_blocks(t3), Markdown)
+
+    def test_format_mcp_response_multi_ticker_quote_renders_all_symbols(self):
+        from agenthood.tui.format import _format_mcp_response
+
+        payload = {
+            "data": {
+                "results": [
+                    {
+                        "quote": {
+                            "symbol": "AAPL",
+                            "last_trade_price": "225.00",
+                            "adjusted_previous_close": "220.00",
+                            "bid_price": "224.90",
+                            "ask_price": "225.10",
+                        }
+                    },
+                    {
+                        "quote": {
+                            "symbol": "NVDA",
+                            "last_trade_price": "140.00",
+                            "adjusted_previous_close": "135.00",
+                            "bid_price": "139.90",
+                            "ask_price": "140.10",
+                        }
+                    },
+                ]
+            }
+        }
+        out = _format_mcp_response(payload, "AAPL, NVDA Quote")
+        assert "AAPL" in out
+        assert "NVDA" in out
+        assert "$225.00" in out
+        assert "$140.00" in out
+        assert "Verdict" in out or "Signal" in out
+
+    def test_format_mcp_response_single_quote_includes_day_change_and_verdict(self):
+        from agenthood.tui.format import _format_mcp_response
+
+        payload = {
+            "data": {
+                "results": [
+                    {
+                        "quote": {
+                            "symbol": "NVDA",
+                            "last_trade_price": "220.00",
+                            "adjusted_previous_close": "200.00",
+                            "bid_price": "219.90",
+                            "ask_price": "220.10",
+                        }
+                    }
+                ]
+            }
+        }
+        out = _format_mcp_response(payload, "NVDA Quote")
+        assert "+10.00%" in out
+        assert "BUY" in out
+
+    def test_no_emojis_or_em_dashes_in_ui_modules(self):
+        """AGENTS.md rule: No emojis. No em-dashes."""
+        from pathlib import Path
+        import agenthood
+
+        pkg = Path(agenthood.__file__).parent
+        ui_files = [
+            pkg / "cli.py",
+            pkg / "tui" / "render.py",
+            pkg / "tui" / "watch.py",
+            pkg / "tui" / "actions.py",
+            pkg / "tui" / "commands.py",
+        ]
+        for f in ui_files:
+            src = f.read_text()
+            assert "⚠️" not in src, f"Emoji found in {f.name}"
+            assert "⚡" not in src, f"Emoji found in {f.name}"
+            # Check string literals don't output em-dashes
+            for line in src.splitlines():
+                stripped = line.lstrip()
+                assert "—" not in stripped, f"Em-dash found in {f.name}: {line}"
+
+
+# ── Slice 1: Tab Completion, Dynamic Context, & Numeric Quick-Select ──────────
+
+class TestTabCompletionAndQuickSelect:
+
+    def test_completer_completes_ticker_and_company_names_after_dot_quote_or_analyze(self):
+        from agenthood.tui.input import _make_completer, set_completion_context
+
+        set_completion_context(["PLTR", "NVDA"])
+        comp = _make_completer()
+
+        with pytest.MonkeyPatch.context() as mp:
+            import readline
+            mp.setattr(readline, "get_line_buffer", lambda: ".q nv")
+            matches = []
+            i = 0
+            while (m := comp("nv", i)) is not None:
+                matches.append(m)
+                i += 1
+            assert "NVDA" in matches or "nvidia" in [x.lower() for x in matches]
+
+            mp.setattr(readline, "get_line_buffer", lambda: ".a pl")
+            matches_a = []
+            i = 0
+            while (m := comp("pl", i)) is not None:
+                matches_a.append(m)
+                i += 1
+            assert "PLTR" in matches_a
+
+    def test_completer_completes_watch_direction_after_ticker(self):
+        from agenthood.tui.input import _make_completer
+
+        comp = _make_completer()
+        with pytest.MonkeyPatch.context() as mp:
+            import readline
+            mp.setattr(readline, "get_line_buffer", lambda: ".watch NVDA b")
+            assert comp("b", 0) == "below"
+
+            mp.setattr(readline, "get_line_buffer", lambda: "watch AAPL a")
+            assert comp("a", 0) == "above"
+
+    def test_completer_completes_lowercase_ticker_suffixes(self):
+        from agenthood.tui.input import _make_completer
+
+        comp = _make_completer()
+        with pytest.MonkeyPatch.context() as mp:
+            import readline
+            mp.setattr(readline, "get_line_buffer", lambda: "nvda op")
+            assert comp("op", 0) == "options"
+
+    def test_handle_meta_numeric_quick_select_quotes_recent_ticker(self):
+        """Typing '1' or '.1' selects the #1 ticker from the most recent table."""
+        mock_agent = MagicMock()
+        mock_agent.config.model = "test"
+        mock_agent._recent_tickers = ["BMBL", "GS", "BBAI"]
+
+        # '1' -> 1st ticker (BMBL), '2' -> 2nd ticker (GS)
+        assert handle_meta("1", mock_agent) == ("__quote__", "BMBL")
+        assert handle_meta("2", mock_agent) == ("__quote__", "GS")
+        assert handle_meta(".1", mock_agent) == ("__quote__", "BMBL")
+        assert handle_meta(".a 2", mock_agent) == ["GS"]
+
+    def test_format_mcp_response_includes_row_indices_and_clickable_links(self):
+        """Multi-ticker quotes and positions tables include 1-based # indices and Robinhood links."""
+        from agenthood.tui.format import _format_mcp_response
+
+        raw_quotes = {
+            "results": [
+                {"quote": {"symbol": "NVDA", "last_trade_price": "220.00", "adjusted_previous_close": "210.00", "bid_price": "219.90", "ask_price": "220.10"}},
+                {"quote": {"symbol": "AAPL", "last_trade_price": "195.00", "adjusted_previous_close": "194.00", "bid_price": "194.90", "ask_price": "195.10"}},
+            ]
+        }
+        table = _format_mcp_response(raw_quotes, "Top Movers Quote")
+        assert "| # |" in table
+        assert "| 1 |" in table
+        assert "| 2 |" in table
+        assert "https://robinhood.com/stocks/NVDA" in table
+        assert "https://robinhood.com/stocks/AAPL" in table
+
+        raw_pos = {
+            "results": [
+                {"symbol": "TSLA", "quantity": "5", "average_buy_price": "200.00", "current_price": "250.00"},
+            ]
+        }
+        pos_table = _format_mcp_response(raw_pos, "Positions")
+        assert "| # |" in pos_table
+        assert "| 1 |" in pos_table
+        assert "https://robinhood.com/stocks/TSLA" in pos_table
+
+    def test_handle_meta_trending_movers_and_risk_dot_commands(self):
+        """Zero-LLM dot-commands .trending/.t, .movers, and .risk return dedicated action sentinels."""
+        mock_agent = MagicMock()
+        mock_agent.config.model = "test"
+        mock_agent.last_ticker = "NVDA"
+        mock_agent._recent_tickers = ["NVDA", "AAPL"]
+
+        assert handle_meta(".trending", mock_agent) == "__trending__"
+        assert handle_meta(".t", mock_agent) == "__trending__"
+        assert handle_meta(".movers", mock_agent) == "__movers__"
+        assert handle_meta(".risk NVDA 180", mock_agent) == ("__risk__", "NVDA", 180.0)
+        assert handle_meta(".risk", mock_agent) == ("__risk__", "NVDA", None)
+        assert handle_meta(".risk 2 185.5", mock_agent) == ("__risk__", "AAPL", 185.5)
+
+    @pytest.mark.asyncio
+    async def test_run_discovery_and_run_risk_actions(self):
+        """run_discovery and run_risk render structured markdown tables without LLM overhead."""
+        from unittest.mock import AsyncMock
+        from agenthood.tui import actions
+
+        mock_agent = MagicMock()
+        mock_agent.config.max_order_value = 5000.0
+        mock_agent._get_account_number = AsyncMock(return_value="ACC-1")
+        mock_agent._fetch_discovery_movers = AsyncMock(
+            return_value=("## Trending Stocks Quote\n| # | Symbol |\n|---|---|", ["NVDA", "AAPL"])
+        )
+
+        bars = [{"close_price": str(190.0 + i), "high_price": str(192.0 + i), "low_price": str(189.0 + i)} for i in range(20)]
+
+        async def fake_direct(name, params):
+            if name == "robinhood_get_portfolio":
+                return {"data": {"total_value": "25000.00"}}
+            if name == "robinhood_get_equity_quotes":
+                return {"results": [{"quote": {"symbol": "NVDA", "last_trade_price": "200.00"}}]}
+            if name == "robinhood_get_equity_historicals":
+                return {"results": [{"historicals": bars}]}
+            raise ValueError(name)
+
+        mock_agent._call_tool_direct = AsyncMock(side_effect=fake_direct)
+
+        rendered = []
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(actions, "render_response", lambda text, elapsed: rendered.append(text))
+            await actions.run_discovery(mock_agent, "__trending__")
+            await actions.run_risk(mock_agent, "NVDA", 190.0)
+
+        assert len(rendered) == 2
+        assert "Trending Stocks Quote" in rendered[0]
+        assert "NVDA Position Sizing & Risk Plan" in rendered[1]
+        assert "25 shares" in rendered[1]
+        assert "14-Day Wilder RSI" in rendered[1]
+
+
+
+
+

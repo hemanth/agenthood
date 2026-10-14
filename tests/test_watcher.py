@@ -486,3 +486,45 @@ class TestIntervalDoesNotEatPrice:
         s = parse_watch_prompt("watch AAPL below $180")
         assert s["threshold"] == 180.0
         assert s["interval"] == 30
+
+
+# ── Intent refinements: questions, stopwords, company names, pronoun context ──
+
+class TestWatchIntentRefinements:
+
+    def test_questions_are_not_watch_prompts(self):
+        assert parse_watch_prompt("is AAPL above $200?") is None
+        assert parse_watch_prompt("why did NVDA drop below $100?") is None
+        assert parse_watch_prompt("what happens if TSLA falls below $200?") is None
+        assert parse_watch_prompt("did MSFT go above $400?") is None
+        assert parse_watch_prompt("which stocks are below $50?") is None
+
+    def test_polite_requests_still_parse_as_watches(self):
+        s1 = parse_watch_prompt("can you watch AAPL below $180?")
+        assert s1 is not None and s1["ticker"] == "AAPL" and s1["threshold"] == 180.0
+        s2 = parse_watch_prompt("please alert me when TSLA hits $250")
+        assert s2 is not None and s2["ticker"] == "TSLA" and s2["threshold"] == 250.0
+
+    def test_stopwords_do_not_shadow_real_ticker(self):
+        s1 = parse_watch_prompt("when price of AAPL drops below $180")
+        assert s1 is not None and s1["ticker"] == "AAPL"
+        s2 = parse_watch_prompt("buy 10 shares of NVDA when below 800")
+        assert s2 is not None and s2["ticker"] == "NVDA" and s2["shares"] == 10
+        s3 = parse_watch_prompt("alert me if stock price of MSFT falls under 400")
+        assert s3 is not None and s3["ticker"] == "MSFT"
+
+    def test_company_names_resolve_to_tickers_in_watch(self):
+        s1 = parse_watch_prompt("watch Apple below $180")
+        assert s1 is not None and s1["ticker"] == "AAPL"
+        s2 = parse_watch_prompt("alert me when Nvidia hits $150")
+        assert s2 is not None and s2["ticker"] == "NVDA"
+        s3 = parse_watch_prompt("notify me if Bitcoin drops below 80000")
+        assert s3 is not None and s3["ticker"] == "BTC"
+
+    def test_pronoun_watch_uses_context_ticker(self):
+        s = parse_watch_prompt("watch it below $180", context_ticker="NVDA")
+        assert s is not None
+        assert s["ticker"] == "NVDA"
+        assert s["threshold"] == 180.0
+        assert s["direction"] == "below"
+

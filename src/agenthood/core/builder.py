@@ -125,8 +125,14 @@ def _register_tools(agent: Agent, tools: list, core_tools_only: bool) -> None:
                 agent._add_tool_internal(tool, deferred=False)
     else:
         # Core tools always active; rest deferred behind search_tools
+        has_deferred = False
         for tool in tools:
-            agent._add_tool_internal(tool, deferred=tool.name not in CORE_TOOLS)
+            is_deferred = tool.name not in CORE_TOOLS
+            agent._add_tool_internal(tool, deferred=is_deferred)
+            if is_deferred:
+                has_deferred = True
+        if has_deferred and hasattr(agent, "_ensure_search_tool"):
+            agent._ensure_search_tool()
 
     logger.info("Loaded %d Robinhood tools (deferred search enabled)", len(tools))
 

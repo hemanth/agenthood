@@ -35,30 +35,90 @@ STOPWORDS = {
     "ATH", "YTD", "NYSE", "GDP", "CPI", "FED", "SEC", "FAQ", "USD",
 }
 
+# Canonical company / crypto name -> ticker symbol map.
+NAME_TO_TICKER: dict[str, str] = {
+    "APPLE": "AAPL", "GOOGLE": "GOOGL", "ALPHABET": "GOOGL",
+    "MICROSOFT": "MSFT", "AMAZON": "AMZN", "META": "META",
+    "FACEBOOK": "META", "TESLA": "TSLA", "NVIDIA": "NVDA",
+    "NETFLIX": "NFLX", "PAYPAL": "PYPL", "AMD": "AMD",
+    "INTEL": "INTC", "DISNEY": "DIS", "WALMART": "WMT",
+    "JPMORGAN": "JPM", "BERKSHIRE": "BRK.B", "VISA": "V",
+    "MASTERCARD": "MA", "SALESFORCE": "CRM", "UBER": "UBER",
+    "SPOTIFY": "SPOT", "AIRBNB": "ABNB", "COINBASE": "COIN",
+    "ROBINHOOD": "HOOD", "SNAP": "SNAP", "PINTEREST": "PINS",
+    "PALANTIR": "PLTR", "SNOWFLAKE": "SNOW", "CROWDSTRIKE": "CRWD",
+    "SHOPIFY": "SHOP", "SQUARE": "XYZ", "BLOCK": "XYZ",
+    "BROADCOM": "AVGO", "COSTCO": "COST", "ORACLE": "ORCL",
+    "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL", "DOGECOIN": "DOGE",
+}
 
-def extract_tickers(text: str, limit: int | None = None) -> list[str]:
+# Unambiguous multi-letter company names safe to match case-insensitively in prose
+# (excludes common English words like "apple" only when not in a market query? No,
+# in a trading CLI "apple", "nvidia", "microsoft", "paypal", "tesla", "google",
+# "amazon", "netflix", "palantir", "coinbase", "bitcoin", "ethereum" are companies).
+_PROSE_COMPANY_NAMES = {
+    k for k in NAME_TO_TICKER
+    if k not in {"VISA", "SQUARE", "BLOCK", "SNAP", "META"}
+}
+
+_PRONOUN_RE = re.compile(r"\b(it|its|that|this)\b", re.IGNORECASE)
+_MARKET_HINT_RE = re.compile(
+    r"\b(price|quote|trading|stock|shares?|buy|sell|hold|analyze|analysis|"
+    r"rsi|macd|pe|p/e|fundamentals?|options?|calls?|puts?|chart|worth|value|"
+    r"high|low|earnings|compare|vs|doing|look|looking)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_tickers(
+    text: str,
+    limit: int | None = None,
+    context_ticker: str | None = None,
+) -> list[str]:
     """Return plausible ticker symbols found in *text*, stopwords removed.
 
     Case is the signal, so it is preserved rather than upper-cased away:
 
-    - A message that is one bare word is a ticker either way -- "nvda", "PYPL".
-    - In a longer sentence only ALREADY-uppercase words count. Upper-casing
-      first turns "tell me a joke" into the ticker A (Agilent), which is how
-      an off-topic question ends up answered with a stock quote.
-
-    Deliberately conservative: this only runs after the LLM failed to route, and
-    finding nothing is fine -- the caller falls through to a plain reply.
+    - A message that is one bare word is a ticker or company name either way --
+      "nvda", "NVDA", "nvidia", "apple".
+    - In a longer sentence, ALREADY-uppercase words and known company names
+      count. Upper-casing everything first would turn "tell me a joke" into the
+      ticker A (Agilent).
+    - When *context_ticker* is provided and the sentence refers to "it"/"its"
+      in a market context with no explicit symbol, *context_ticker* is returned.
     """
     stripped = text.strip()
+    if not stripped:
+        return []
     words = stripped.split()
 
-    # Bare single word: accept any case ("nvda" and "NVDA" both mean the ticker)
+    # Bare single word: accept any case ("nvda", "NVDA", "nvidia", "apple")
     if len(words) == 1:
         cand = words[0].upper().strip("?!.,;:$'\"")
+        if cand in NAME_TO_TICKER:
+            return [NAME_TO_TICKER[cand]]
         if _TICKER_RE.fullmatch(cand) and cand not in STOPWORDS:
             return [cand]
         return []
 
-    # Sentence: only words the user actually typed in caps
-    found = [t for t in _TICKER_RE.findall(stripped) if t not in STOPWORDS]
+    # Sentence: 1) words the user actually typed in caps, 2) unambiguous company names
+    found: list[str] = []
+    for raw_tok in words:
+        clean = raw_tok.strip("?!.,;:$'\"()[]{}")
+        if not clean:
+            continue
+        up = clean.upper()
+        if clean.isupper() and _TICKER_RE.fullmatch(up) and up not in STOPWORDS:
+            sym = NAME_TO_TICKER.get(up, up)
+            if sym not in found:
+                found.append(sym)
+        elif up in _PROSE_COMPANY_NAMES:
+            sym = NAME_TO_TICKER[up]
+            if sym not in found:
+                found.append(sym)
+
+    if not found and context_ticker and _PRONOUN_RE.search(stripped) and _MARKET_HINT_RE.search(stripped):
+        found.append(context_ticker.upper())
+
     return found[:limit] if limit else found
+

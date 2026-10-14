@@ -34,7 +34,7 @@ def _strip_emoji(s: str) -> str:
 
 def print_banner(model: str, dry_run: bool, max_order: float,
                  token_info: str = "", session_name: Optional[str] = None) -> None:
-    """Clean Rich Panel banner — sharp, minimal, no ASCII art."""
+    """Clean Rich Panel banner -- sharp, minimal, no ASCII art."""
     mode_label = "dry-run" if dry_run else "live"
     mode_color = C_TRADE_L if dry_run else C_TRADE_R
     short = _short_model(model)
@@ -49,10 +49,12 @@ def print_banner(model: str, dry_run: bool, max_order: float,
     body.append("\n")
     body.append("?", style=C_ACCENT)
     body.append(" help", style=C_DIMMER)
+    body.append("   .p", style=C_ACCENT)
+    body.append(" portfolio", style=C_DIMMER)
+    body.append("   .a", style=C_ACCENT)
+    body.append(" analyze", style=C_DIMMER)
     body.append("   .model", style=C_ACCENT)
     body.append(" switch", style=C_DIMMER)
-    body.append("   .sessions", style=C_ACCENT)
-    body.append(" list", style=C_DIMMER)
     body.append("   Ctrl+R", style=C_ACCENT)
     body.append(" search", style=C_DIMMER)
 
@@ -69,6 +71,12 @@ def print_banner(model: str, dry_run: bool, max_order: float,
 
 # ── Response rendering ────────────────────────────────────────────────────────
 
+_MD_FEATURE_RE = re.compile(
+    r"(^\s*#{1,6}\s+|\|[\s:-]{2,}\||^\s*[-*]\s+|^\s*\d+\.\s+|\*\*[^*\n]+\*\*)",
+    re.MULTILINE,
+)
+
+
 def _render_with_code_blocks(text: str):
     """Split on ```lang\\n...``` fences; return a Rich renderable."""
     from rich.markdown import Markdown
@@ -78,9 +86,8 @@ def _render_with_code_blocks(text: str):
         # Check for Rich markup tags (e.g. [bold cyan], [bold green], [green])
         if "[" in text and "]" in text and any(tag in text for tag in ("green", "red", "yellow", "cyan", "bold")):
             return Text.from_markup(text)
-        # Check for markdown features (tables, headers)
-        has_markdown = any(marker in text for marker in ("|---|", "## "))
-        if has_markdown:
+        # Check for markdown features (tables, headers, lists, bold)
+        if _MD_FEATURE_RE.search(text):
             return Markdown(text)
         return Text(text)
 
@@ -124,30 +131,38 @@ _HELP_EXAMPLES = [
     "is TSLA overbought? check the RSI",
     "BTC and ETH prices",
     "my portfolio",
-    "any earnings this week?",
+    "watch NVDA below $180",
     "should I buy more MSFT here?",
 ]
 
 _HELP_META = [
-    (".analyze",    "full analysis of a ticker (or multiple: .analyze PYPL, GOOGL)"),
+    (".analyze",    "full analysis of a ticker (.a NVDA, or .a 1)"),
+    (".quote",      "quick quote for ticker(s) (.q AAPL, NVDA, or 1..9)"),
+    (".trending",   "live trending stocks table (.t)"),
+    (".movers",     "live daily top movers table (.mv)"),
+    (".risk",       "position sizing & 1%/2% risk plan (.risk NVDA [STOP])"),
     (".portfolio",  "view portfolio summary (.port, .p)"),
     (".positions",  "view open positions (.pos)"),
-    (".quote",      "quick quote for a ticker (.q AAPL)"),
+    (".watches",    "list active price watches (.watch TICKER below PRICE)"),
+    (".history",    "view recent conversation turns"),
+    (".status",     "view session, model, and context status"),
     (".tools",      "list loaded MCP tools"),
-    (".model",      "switch model"),
-    (".sessions",   "list sessions"),
-    (".new",        "new conversation"),
+    (".model",      "switch model (.m)"),
+    (".sessions",   "list saved sessions"),
+    (".new",        "new conversation (.reset, .clear)"),
     (".cost",       "token usage"),
-    (".memory",     "remembered facts"),
-    (".verbose",    "debug mode"),
+    (".memory",     "remembered facts (.mem)"),
+    (".verbose",    "toggle debug mode"),
     (".update",     "upgrade agenthood from PyPI"),
     ("exit",        "quit"),
 ]
 
 _HELP_KEYS = [
+    ("Tab",        "context-aware completion (.commands, tickers, company names)"),
+    ("1 .. 9",     "instant quote for row #N from the last table (.a 1 to analyze)"),
+    ("Cmd+Click",  "open ticker directly on Robinhood from any table"),
     ("Ctrl+R",     "reverse-search history"),
     ("Up / Down",  "navigate history"),
-    ("Tab",        "complete .commands"),
     ("\\",         "continue line (multi-line input)"),
 ]
 
@@ -155,7 +170,7 @@ _HELP_KEYS = [
 def print_help() -> None:
     # Examples section
     ex = Text()
-    ex.append("just ask anything — ", style=C_DIMMER)
+    ex.append("just ask anything -- ", style=C_DIMMER)
     ex.append("no special syntax needed\n\n", style=C_DIM)
     for e in _HELP_EXAMPLES:
         ex.append("  ❯  ", style=C_DIMMER)
@@ -214,7 +229,7 @@ def _analyze_provider(analyze_base: str) -> str:
     return urlparse(analyze_base).hostname or "custom"
 
 
-def _print_status(agent, turn: int, cost_usd: float) -> None:
+def _print_status(agent, turn: int, cost_usd: float, active_watches: int = 0) -> None:
     cfg   = agent.config
     trade_label = "DRY-RUN" if cfg.dry_run else "LIVE"
     trade_style = C_TRADE_L if cfg.dry_run else C_TRADE_R
@@ -228,12 +243,20 @@ def _print_status(agent, turn: int, cost_usd: float) -> None:
     # Show analyze provider if configured
     analyze_model = getattr(cfg, 'analyze_model', '')
     analyze_base = getattr(cfg, 'analyze_api_base', '')
-    if analyze_model and analyze_base:
+    if isinstance(analyze_model, str) and isinstance(analyze_base, str) and analyze_model and analyze_base:
         line.append(" | ", style=C_DIM)
         line.append("analyze ", style=C_DIM)
         line.append(_short_model(analyze_model), style=C_ACCENT)
         line.append(f" ({_analyze_provider(analyze_base)})", style=C_DIM)
+    ctx_ticker = getattr(agent, "last_ticker", None)
+    if isinstance(ctx_ticker, str) and ctx_ticker:
+        line.append(" | ", style=C_DIM)
+        line.append("ctx ", style=C_DIM)
+        line.append(ctx_ticker, style=C_ACCENT)
+    if active_watches > 0:
+        line.append(f" | {active_watches} watch{'es' if active_watches > 1 else ''}", style=C_DIM)
     line.append("  ", style=C_DIM)
     line.append(trade_label, style=trade_style)
     line.append(f"  turn {turn}{cost}", style=C_DIM)
     console.print(line)
+

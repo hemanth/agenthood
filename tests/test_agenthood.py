@@ -521,7 +521,7 @@ class TestAnalyze:
         hood._llm_completion = _fake_llm
 
         result = await hood.analyze("AAPL")
-        assert call_count == 4  # all 4 attempted
+        assert call_count == 5  # all 5 attempted (quotes, fundamentals, analyst_ratings, technicals, historicals)
         assert "MCP down" in captured[0]  # error included in prompt
         assert "analysis with partial data" in result
 
@@ -667,6 +667,19 @@ def test_extract_tickers_is_case_sensitive_in_sentences():
     # Pronoun "I" and finance jargon are not symbols
     assert extract_tickers("I want to buy AAPL") == ["AAPL"]
     assert extract_tickers("what is an ETF?") == []
+
+
+def test_extract_tickers_resolves_company_names_and_context():
+    """Company names (e.g. 'nvidia', 'apple') and pronoun context resolve to canonical tickers."""
+    from agenthood.core.tickers import extract_tickers
+    assert extract_tickers("nvidia") == ["NVDA"]
+    assert extract_tickers("apple") == ["AAPL"]
+    assert extract_tickers("paypal") == ["PYPL"]
+    assert extract_tickers("what is nvidia trading at?") == ["NVDA"]
+    assert extract_tickers("compare apple and microsoft") == ["AAPL", "MSFT"]
+    assert extract_tickers("what is it trading at?", context_ticker="TSLA") == ["TSLA"]
+    assert extract_tickers("tell me a joke", context_ticker="TSLA") == []
+
 
 
 def test_system_prompt_forbids_tool_use_for_meta_questions():
@@ -925,3 +938,292 @@ def test_setup_llm_openrouter_save_key_does_not_raise_name_error(monkeypatch):
     out = S.setup_llm()
     assert out["api_key"] == "sk-or-test-123"
     assert out["api_base"] == "https://openrouter.ai/api/v1"
+
+
+# ── Multi-turn context & intent recovery ─────────────────────────────────────
+
+@pytest.mark.asyncio
+class TestMultiTurnAndIntentRecovery:
+
+    async def test_last_ticker_tracks_across_chat_analyze_and_clear(self):
+        mock = _make_agent({"response": "NVDA is $219"})
+        hood = await _build_hood(mock)
+        assert hood.last_ticker is None
+
+        await hood.chat("what is NVDA trading at?")
+        assert hood.last_ticker == "NVDA"
+
+        hood._call_tool_direct = AsyncMock(return_value={"data": "ok"})
+        hood._llm_completion = AsyncMock(return_value="## AAPL Analysis\n**Verdict**: BUY")
+        await hood.analyze("aapl")
+        assert hood.last_ticker == "AAPL"
+        assert any("AAPL" in h[1] for h in hood._history if h[0] == "assistant")
+
+        hood.record_turn(".quote MSFT", "## MSFT Quote\n$420.00", tickers=["MSFT"])
+        assert hood.last_ticker == "MSFT"
+
+        hood.clear_history()
+        assert hood.last_ticker is None
+        assert hood._history == []
+
+    async def test_multiturn_followup_injects_context_into_infer(self):
+        mock = _make_agent({"response": "ok"})
+        hood = await _build_hood(mock)
+
+        # Turn 1: bare ticker passes through unmodified
+        await hood.chat("NVDA")
+        assert mock.infer.call_args[0][0] == "NVDA"
+
+        # Turn 2: pronoun follow-up gets context injected so infer() knows 'its' == NVDA
+        await hood.chat("what is its P/E ratio?")
+        second_arg = mock.infer.call_args[0][0]
+        assert "NVDA" in second_arg
+        assert "what is its P/E ratio?" in second_arg
+
+    async def test_multiturn_comparative_followup_injects_context(self):
+        mock = _make_agent({"response": "ok"})
+        hood = await _build_hood(mock)
+
+        await hood.chat("AAPL")
+        await hood.chat("compare with MSFT")
+        second_arg = mock.infer.call_args[0][0]
+        assert "AAPL" in second_arg
+        assert "compare with MSFT" in second_arg
+        assert hood.last_ticker == "MSFT"
+
+    async def test_multiturn_standalone_meta_does_not_inject_stale_ticker(self):
+        mock = _make_agent({"response": "I can quote stocks and check your portfolio."})
+        hood = await _build_hood(mock)
+
+        await hood.chat("NVDA")
+        await hood.chat("what can you do?")
+        second_arg = mock.infer.call_args[0][0]
+        assert second_arg == "what can you do?"
+
+    async def test_multiturn_watch_pronoun_uses_last_ticker(self):
+        mock = _make_agent({"response": "NVDA is $219"})
+        hood = await _build_hood(mock)
+
+        await hood.chat("NVDA")
+        res = await hood.chat("watch it below $180")
+        assert isinstance(res, dict) and "__watch__" in res
+        assert res["__watch__"]["ticker"] == "NVDA"
+        assert res["__watch__"]["threshold"] == 180.0
+
+    async def test_multiturn_order_cancellation_handled_cleanly(self):
+        mock = _make_agent({
+            "response": "I'm about to place a limit buy for 5 NVDA at $200.00. Confirm? (yes/no)"
+        })
+        hood = await _build_hood(mock)
+
+        await hood.chat("buy 5 NVDA at $200")
+        mock.infer.reset_mock()
+
+        reply = await hood.chat("no")
+        assert "cancel" in reply.lower()
+        mock.infer.assert_not_awaited()
+
+    async def test_multiturn_order_confirmation_passes_review_context_to_infer(self):
+        mock = _make_agent({
+            "response": "I'm about to place a limit buy for 5 NVDA at $200.00. Confirm? (yes/no)"
+        })
+        hood = await _build_hood(mock)
+
+        await hood.chat("buy 5 NVDA at $200")
+        mock.infer.return_value = {"response": "Order placed: Buy 5 NVDA at $200.00"}
+
+        reply = await hood.chat("yes")
+        infer_arg = mock.infer.call_args[0][0]
+        assert "buy 5 NVDA at $200" in infer_arg
+        assert "Confirm?" in infer_arg
+        assert "Order placed" in reply
+
+    async def test_chat_routing_miss_recovers_portfolio_and_positions(self):
+        mock = _make_agent({"error": "No appropriate tool found"})
+        hood = await _build_hood(mock)
+
+        async def fake_direct(name, params):
+            if name == "robinhood_get_accounts":
+                return {"data": {"accounts": [{"account_number": "ACC1", "agentic_allowed": True}]}}
+            if name == "robinhood_get_portfolio":
+                return {"data": {"total_value": "25000.00", "cash": "5000.00", "equity_value": "20000.00"}}
+            if name == "robinhood_get_equity_positions":
+                return {"data": {"results": [{"symbol": "NVDA", "quantity": "10", "average_buy_price": "150.00", "current_price": "200.00"}]}}
+            raise ValueError(name)
+
+        hood._call_tool_direct = AsyncMock(side_effect=fake_direct)
+
+        port_out = await hood.chat("show my portfolio")
+        assert "25,000.00" in port_out
+
+        pos_out = await hood.chat("show my positions")
+        assert "NVDA" in pos_out
+
+    async def test_chat_routing_miss_recovers_pronoun_quote_from_last_ticker(self):
+        mock = _make_agent({"error": "No appropriate tool found"})
+        hood = await _build_hood(mock)
+        hood.record_turn("NVDA", "NVDA analysis", tickers=["NVDA"])
+
+        hood._call_tool_direct = AsyncMock(return_value={
+            "results": [{"quote": {"symbol": "NVDA", "last_trade_price": "219.50", "adjusted_previous_close": "215.00"}}]
+        })
+        out = await hood.chat("what is it trading at?")
+        assert "NVDA" in out
+        assert "219.50" in out
+
+    async def test_chat_best_stock_to_buy_fetches_trending_movers_table(self):
+        """Regression: 'best stock to buy' fell through to generic SCOPE_MESSAGE instead of live market movers."""
+        mock = _make_agent({"error": "No appropriate tool found"})
+        hood = await _build_hood(mock)
+
+        async def fake_direct(name, params):
+            if name == "robinhood_get_popular_watchlists":
+                return {
+                    "data": {
+                        "lists": [
+                            {"id": "trend-1", "display_name": "Trending stocks"},
+                            {"id": "movers-1", "display_name": "Daily movers"},
+                        ]
+                    }
+                }
+            if name == "robinhood_get_watchlist_items":
+                return {
+                    "data": {
+                        "items": [
+                            {"symbol": "NVDA"},
+                            {"symbol": "AAPL"},
+                            {"symbol": "TSLA"},
+                        ]
+                    }
+                }
+            if name == "robinhood_get_equity_quotes":
+                return {
+                    "results": [
+                        {"quote": {"symbol": "NVDA", "last_trade_price": "220.00", "adjusted_previous_close": "210.00", "bid_price": "219.90", "ask_price": "220.10"}},
+                        {"quote": {"symbol": "AAPL", "last_trade_price": "195.00", "adjusted_previous_close": "194.00", "bid_price": "194.95", "ask_price": "195.05"}},
+                        {"quote": {"symbol": "TSLA", "last_trade_price": "250.00", "adjusted_previous_close": "260.00", "bid_price": "249.80", "ask_price": "250.20"}},
+                    ]
+                }
+            raise ValueError(name)
+
+        hood._call_tool_direct = AsyncMock(side_effect=fake_direct)
+
+        out = await hood.chat("best stock to buy")
+        assert "NVDA" in out
+        assert "$220.00" in out
+        assert "BUY" in out
+        assert "|" in out  # formatted as a markdown table
+        assert hood.last_ticker in ("NVDA", "AAPL", "TSLA")
+
+
+def test_register_tools_calls_ensure_search_tool_when_deferred():
+    """Regression: _register_tools used _add_tool_internal(deferred=True) without calling _ensure_search_tool().
+
+    Because of that, 'search_tools' was never registered in agent.tools, so every
+    time the LLM tried to discover any of the 82 deferred Robinhood tools,
+    agentu failed with 'Error: Tool search_tools not found'.
+    """
+    from agenthood.core.builder import _register_tools
+
+    fake_agent = MagicMock()
+    t_core = MagicMock()
+    t_core.name = "robinhood_get_equity_quotes"
+    t_def = MagicMock()
+    t_def.name = "robinhood_get_portfolio"
+
+    _register_tools(fake_agent, [t_core, t_def], core_tools_only=False)
+    fake_agent._ensure_search_tool.assert_called_once()
+
+
+def test_is_no_tool_sentinel_catches_search_tools_not_found():
+    from agenthood.core.agent import _is_no_tool_sentinel
+    assert _is_no_tool_sentinel("Error: Tool search_tools not found") is True
+
+
+class TestScienceBackedQuant:
+    """Science-backed quantitative indicators and risk sizing (zero external deps)."""
+
+    def test_compute_wilder_rsi_14_known_series(self):
+        from agenthood.core.quant import compute_wilder_rsi
+        # Monotonically rising closes -> RSI approaches 100
+        rising = [100.0 + i * 2.0 for i in range(20)]
+        rsi_up = compute_wilder_rsi(rising, period=14)
+        assert rsi_up is not None and rsi_up > 95.0
+
+        # Monotonically falling closes -> RSI approaches 0
+        falling = [200.0 - i * 2.0 for i in range(20)]
+        rsi_down = compute_wilder_rsi(falling, period=14)
+        assert rsi_down is not None and rsi_down < 5.0
+
+        # Alternating +1 / -1 -> RSI near 50
+        flat = [100.0 + (1.0 if i % 2 == 0 else -1.0) for i in range(30)]
+        rsi_flat = compute_wilder_rsi(flat, period=14)
+        assert rsi_flat is not None and 45.0 <= rsi_flat <= 55.0
+
+    def test_compute_realized_volatility_and_max_drawdown(self):
+        from agenthood.core.quant import compute_max_drawdown, compute_realized_volatility
+        # Peak 200 -> trough 150 -> recovery 180 => max drawdown = -25.0%
+        closes = [100.0, 150.0, 200.0, 180.0, 150.0, 170.0, 180.0]
+        mdd = compute_max_drawdown(closes)
+        assert mdd == pytest.approx(-25.0, abs=0.01)
+
+        vol = compute_realized_volatility(closes)
+        assert vol is not None and vol > 0.0
+
+    def test_compute_sparkline_renders_unicode_blocks(self):
+        from agenthood.core.quant import compute_sparkline
+        spark = compute_sparkline([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0], width=8)
+        assert len(spark) == 8
+        assert spark[0] == "▁"
+        assert spark[-1] == "█"
+
+    def test_compute_position_sizing_fixed_fractional_risk(self):
+        from agenthood.core.quant import compute_position_size
+        # $25,000 portfolio, 1% risk ($250 max loss), entry $200, stop $190 ($10/sh risk) -> 25 shares
+        plan = compute_position_size(
+            equity=25000.0,
+            entry_price=200.0,
+            stop_price=190.0,
+            risk_pct=0.01,
+        )
+        assert plan["risk_dollars"] == pytest.approx(250.0)
+        assert plan["per_share_risk"] == pytest.approx(10.0)
+        assert plan["shares_1pct"] == 25
+        assert plan["notional_1pct"] == pytest.approx(5000.0)
+        assert plan["target_2r"] == pytest.approx(220.0)
+
+    @pytest.mark.asyncio
+    async def test_fetch_market_data_includes_analyst_ratings_and_quant_summary(self):
+        import json
+        from agenthood.core.market_data import fetch_market_data
+
+        mock = _make_agent({"response": "ok"})
+        hood = await _build_hood(mock)
+
+        bars = [{"close_price": str(180.0 + i * 1.5), "high_price": str(182.0 + i * 1.5), "low_price": str(179.0 + i * 1.5)} for i in range(25)]
+
+        async def fake_direct(name, params):
+            if "quotes" in name:
+                return {"results": [{"quote": {"symbol": "NVDA", "last_trade_price": "216.00", "adjusted_previous_close": "210.00"}}]}
+            if "fundamentals" in name:
+                return {"results": [{"pe_ratio": "45.2", "market_cap": "3200000000000"}]}
+            if "technical_indicators" in name:
+                return {"results": [{"sma": "205.0"}]}
+            if "historicals" in name:
+                return {"results": [{"historicals": bars}]}
+            if "analyst_ratings" in name:
+                return {"results": [{"summary": {"num_buy_ratings": 55, "num_hold_ratings": 4, "num_sell_ratings": 1}}]}
+            raise ValueError(name)
+
+        hood._call_tool_direct = AsyncMock(side_effect=fake_direct)
+        dump = await fetch_market_data(hood, "NVDA")
+        parsed = json.loads(dump)
+        assert "analyst_ratings" in parsed
+        assert "quant_metrics" in parsed
+        assert parsed["quant_metrics"]["rsi_14"] > 90.0
+        assert "sparkline_30d" in parsed["quant_metrics"]
+
+
+
+
+

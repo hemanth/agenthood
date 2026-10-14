@@ -4,5 +4,5 @@ from .agent import AgentHood
 from .config import AgentHoodConfig, load_config
 from .hooks import trading_guard
 
-__version__ = "0.3.4"
+__version__ = "0.4.0"
 __all__ = ["AgentHood", "AgentHoodConfig", "load_config", "trading_guard"]

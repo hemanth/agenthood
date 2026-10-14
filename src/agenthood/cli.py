@@ -28,7 +28,7 @@ from agenthood import AgentHood, load_config
 from agenthood.setup import run_setup
 
 
-KNOWN_SUBCOMMANDS = {"setup", "serve", "eval", "watch", "watches", "analyze", "daemon"}
+KNOWN_SUBCOMMANDS = {"setup", "serve", "eval", "watch", "watches", "analyze", "daemon", "completions"}
 
 
 def _add_common_options(p: argparse.ArgumentParser) -> None:
@@ -92,6 +92,10 @@ def _build_command_parser() -> argparse.ArgumentParser:
     d_cmd = sub.add_parser("daemon", help="Manage the AgentHood watcher daemon.")
     d_cmd.add_argument("action", choices=["start", "stop", "status", "logs"])
 
+    # completions subcommand
+    c_cmd = sub.add_parser("completions", help="Output shell tab-completion script for zsh or bash.")
+    c_cmd.add_argument("shell", nargs="?", default="zsh", choices=["zsh", "bash"])
+
     return p
 
 
@@ -145,10 +149,43 @@ def _print_rich(text) -> None:
         print(txt)
 
 
+async def _dispatch_meta_action(agent: AgentHood, meta_result) -> bool:
+    """Execute a non-boolean sentinel returned by handle_meta in CLI / plain contexts."""
+    from agenthood.tui.actions import (
+        run_account_view,
+        run_analyze,
+        run_discovery,
+        run_quote,
+        run_risk,
+    )
+    if meta_result is True:
+        return True
+    if isinstance(meta_result, list):
+        await run_analyze(agent, meta_result)
+        return True
+    if meta_result in ("__trending__", "__movers__"):
+        await run_discovery(agent, meta_result)
+        return True
+    if meta_result == "__portfolio__":
+        await run_account_view(agent, "portfolio")
+        return True
+    if meta_result == "__positions__":
+        await run_account_view(agent, "positions")
+        return True
+    if isinstance(meta_result, tuple) and meta_result[0] == "__risk__":
+        await run_risk(agent, meta_result[1], meta_result[2])
+        return True
+    if isinstance(meta_result, tuple) and meta_result[0] == "__quote__":
+        await run_quote(agent, meta_result[1])
+        return True
+    return False
+
+
 # ── Plain fallback REPL (--plain or non-TTY) ─────────────────────────────────
 
 async def plain_repl(agent: AgentHood) -> None:
     """Minimal REPL for non-TTY or --plain mode."""
+    from agenthood.tui.commands import handle_meta
     cfg = agent.config
     trade = "DRY-RUN" if cfg.dry_run else "LIVE"
     print(f"\nagenthood  model={cfg.model}  trade={trade}  max=${cfg.max_order_value:.0f}")
@@ -164,6 +201,10 @@ async def plain_repl(agent: AgentHood) -> None:
         if user_input.lower() in ("exit", "quit", "q"):
             print("session ended")
             break
+        meta_result = handle_meta(user_input, agent)
+        if meta_result is not False:
+            await _dispatch_meta_action(agent, meta_result)
+            continue
         try:
             response = await agent.chat(user_input)
             print(f"agenthood > {response}\n")
@@ -182,9 +223,10 @@ def _ensure_auth(cfg) -> bool:
     """
     if cfg.mcp_token:
         return True
-    print("\n⚠️  No Robinhood auth token found -- trading tools can't load.")
+    print("\n[!] No Robinhood auth token found -- trading tools can't load.")
     try:
         choice = input("Authenticate with Robinhood now? (y/n) [y]: ").strip().lower() or "y"
+
     except (EOFError, KeyboardInterrupt):
         print()
         return False
@@ -200,8 +242,79 @@ def _ensure_auth(cfg) -> bool:
     return True
 
 
+def _generate_shell_completion(shell: str) -> str:
+    """Return zsh or bash completion script for the agenthood CLI."""
+    subcmds = " ".join(sorted(KNOWN_SUBCOMMANDS))
+    tickers = "NVDA AAPL TSLA MSFT AMZN GOOGL META AMD SPY QQQ PLTR COIN"
+    dotcmds = ".p .pos .q .a .analyze .quote .portfolio .positions .trending .movers .risk .watch .watches .model .cost .memory .tools .help"
+    if shell == "zsh":
+        return f"""#compdef agenthood
+# Install: eval "$(agenthood completions zsh)"
+_agenthood() {{
+  local -a subcommands tickers dotcmds
+  subcommands=({subcmds})
+  tickers=({tickers})
+  dotcmds=({dotcmds})
+  if (( CURRENT == 2 )); then
+    _describe 'subcommand' subcommands
+    _describe 'ticker' tickers
+    _describe 'dot-command' dotcmds
+  else
+    case "${{words[2]}}" in
+      analyze|.a|.analyze|.q|.quote)
+        _describe 'ticker' tickers
+        ;;
+      watch)
+        if (( CURRENT == 3 )); then
+          _describe 'ticker' tickers
+        elif (( CURRENT == 4 )); then
+          compadd below above
+        fi
+        ;;
+      daemon)
+        compadd start stop status logs
+        ;;
+      completions)
+        compadd zsh bash
+        ;;
+    esac
+  fi
+}}
+compdef _agenthood agenthood
+"""
+    return f"""# bash completion for agenthood
+# Install: eval "$(agenthood completions bash)"
+_agenthood_completions() {{
+  local cur prev words
+  cur="${{COMP_WORDS[COMP_CWORD]}}"
+  prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+  if [[ ${{COMP_CWORD}} -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "{subcmds} {tickers} {dotcmds}" -- "${{cur}}") )
+    return 0
+  fi
+  case "${{prev}}" in
+    analyze|.a|.analyze|.q|.quote)
+      COMPREPLY=( $(compgen -W "{tickers}" -- "${{cur}}") )
+      ;;
+    daemon)
+      COMPREPLY=( $(compgen -W "start stop status logs" -- "${{cur}}") )
+      ;;
+    completions)
+      COMPREPLY=( $(compgen -W "zsh bash" -- "${{cur}}") )
+      ;;
+  esac
+}}
+complete -F _agenthood_completions agenthood
+"""
+
+
 async def main() -> None:
     args = parse_args()
+
+    # Shell completions (offline, zero-latency)
+    if args.command == "completions":
+        print(_generate_shell_completion(getattr(args, "shell", "zsh")))
+        return
 
     # Setup wizard
     if args.command == "setup":
@@ -272,11 +385,16 @@ async def main() -> None:
 
     # ── analyze subcommand ─────────────────────────────────────────────────────
     if args.command == "analyze":
-        tickers = [t.upper() for t in args.tickers]
-        print(f"Analyzing {', '.join(tickers)}...\n")
+        import re as _re
+        from agenthood.tui.tickers import _resolve_ticker
+        raw_tokens = []
+        for token in args.tickers:
+            raw_tokens.extend(t.strip() for t in _re.split(r"[,\s]+", token) if t.strip())
         if not _ensure_auth(cfg):
             return
         async with AgentHood(cfg) as agent:
+            tickers = [await _resolve_ticker(agent, t.upper()) for t in raw_tokens]
+            print(f"Analyzing {', '.join(tickers)}...\n")
             for ticker in tickers:
                 result = await agent.analyze(ticker)
                 _print_rich(result)
@@ -364,12 +482,36 @@ async def main() -> None:
 
         # One-shot prompt (non-interactive)
         if args.prompt:
+            prompt_str = " ".join(args.prompt).strip()
+            if prompt_str.startswith("."):
+                from agenthood.tui.commands import handle_meta
+                meta_result = handle_meta(prompt_str, agent)
+                if meta_result is not False:
+                    await _dispatch_meta_action(agent, meta_result)
+                    return
+
             if cfg.stream:
-                await agent.stream(" ".join(args.prompt))
+                await agent.stream(prompt_str)
             else:
-                response = await agent.chat(" ".join(args.prompt))
+                response = await agent.chat(prompt_str)
                 if isinstance(response, dict):
-                    print(response.get("error", str(response)))
+                    if response.get("__watch__") and "spec" in response:
+                        from agenthood.daemon import add_watch, start_daemon
+                        spec = response["spec"]
+                        add_watch(spec)
+                        start_daemon()
+                        act = spec.get("action", "alert")
+                        act_str = (
+                            f"{act} {spec.get('shares', 0)} shares"
+                            if act in ("buy", "sell")
+                            else "alert"
+                        )
+                        print(
+                            f"Added watch: {spec['ticker']} {spec['direction']} "
+                            f"${spec['threshold']:,.2f} -> {act_str} (daemon started)"
+                        )
+                    else:
+                        print(response.get("error", str(response)))
                 else:
                     _print_rich(response)
             return

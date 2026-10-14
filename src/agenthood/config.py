@@ -139,11 +139,27 @@ def load_config(path: str | None = None) -> AgentHoodConfig:
     if os.environ.get("GROQ_API_KEY"):
         cfg.api_key = os.environ["GROQ_API_KEY"]
         cfg.api_base = "https://api.groq.com/openai/v1"
+        if cfg.model == "qwen3":
+            cfg.model = "llama-3.3-70b-versatile"
     elif os.environ.get("OPENAI_API_KEY"):
         cfg.api_key = os.environ["OPENAI_API_KEY"]
+        if cfg.api_base == "http://localhost:11434/v1":
+            cfg.api_base = "https://api.openai.com/v1"
+        if cfg.model == "qwen3":
+            cfg.model = "gpt-4o-mini"
     elif os.environ.get("OPENROUTER_API_KEY") and not cfg.api_key:
         cfg.api_key = os.environ["OPENROUTER_API_KEY"]
         cfg.api_base = "https://openrouter.ai/api/v1"
+        if cfg.model == "qwen3":
+            cfg.model = "nvidia/nemotron-3-super-120b-a12b:free"
+        if not cfg.model_fallbacks:
+            cfg.model_fallbacks = [
+                "google/gemma-4-26b-a4b-it:free",
+                "google/gemma-4-31b-it:free",
+                "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "nvidia/nemotron-3.5-lightning:free",
+                "cohere/north-mini-code:free",
+            ]
     if os.environ.get("AGENTHOOD_DRY_RUN", "").lower() in ("0", "false", "no"):
         cfg.dry_run = False
 

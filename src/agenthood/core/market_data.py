@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Prompt budget for the serialised data dump.
 MAX_DUMP_CHARS = 4000
-LOOKBACK_DAYS = 30
+LOOKBACK_DAYS = 45
 
 
 def _lookback_start() -> str:
@@ -31,6 +31,7 @@ def _sources(sym: str) -> list[tuple[str, str, dict]]:
     return [
         ("quotes", "get_equity_quotes", {"symbols": [sym]}),
         ("fundamentals", "get_equity_fundamentals", {"symbols": [sym]}),
+        ("analyst_ratings", "get_equity_analyst_ratings", {"symbols": [sym]}),
         ("technicals", "get_equity_technical_indicators", {
             "symbol": sym, "type": "sma", "interval": "day", "start_time": start,
         }),
@@ -69,7 +70,13 @@ async def _fetch_one(hood, label: str, base_name: str, params: dict) -> tuple[st
 
 def _trim(data_sections: dict) -> dict:
     """Strip the MCP envelope down to the payload each section carries."""
+    from .quant import summarize_historicals_quant
+
     trimmed = {}
+    quant = summarize_historicals_quant(data_sections.get("historicals"))
+    if quant:
+        trimmed["quant_metrics"] = quant
+
     for key, val in data_sections.items():
         if isinstance(val, str) and val.startswith("ERROR"):
             trimmed[key] = val

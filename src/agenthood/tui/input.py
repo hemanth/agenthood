@@ -7,82 +7,147 @@ from ..config import DATA_DIR as _DATA_DIR
 from .models import MODELS
 from .theme import PROMPT_CONT, PROMPT_MAIN
 
+from ..core.tickers import NAME_TO_TICKER as _NAME_TO_TICKER
+
 _HIST_FILE = _DATA_DIR / "history"
 
 # All dot-commands that can be tab-completed. Keep in sync with handle_meta --
 # the six most-used commands were missing here, so Tab did nothing for them.
 _DOT_COMMANDS = [
-    ".analyze", ".portfolio", ".positions", ".quote", ".tools", ".help",
-    ".model", ".sessions", ".new", ".reset", ".cost", ".memory", ".findings",
-    ".verbose", ".update",
+    ".analyze", ".a", ".portfolio", ".p", ".positions", ".pos",
+    ".quote", ".q", ".watches", ".watch", ".history", ".status",
+    ".tools", ".help", ".model", ".sessions", ".new", ".reset", ".clear",
+    ".cost", ".memory", ".findings", ".verbose", ".update",
+    ".trending", ".t", ".movers", ".risk", ".earnings",
 ]
+
+# Dynamic ticker pool updated during the session (recent tickers, positions, watchlists)
+_DYNAMIC_TICKERS: list[str] = []
+
+
+def set_completion_context(tickers: list[str] | None = None) -> None:
+    """Update the dynamic ticker list prioritized by the readline tab completer."""
+    global _DYNAMIC_TICKERS
+    if not tickers:
+        return
+    merged: list[str] = []
+    for sym in tickers:
+        s = str(sym).strip().upper()
+        if s and s not in merged:
+            merged.append(s)
+    for sym in _DYNAMIC_TICKERS:
+        if sym not in merged:
+            merged.append(sym)
+    _DYNAMIC_TICKERS = merged[:40]
+
 
 # Common intent phrases for completion
 _INTENT_PHRASES = [
     "buy ", "sell ", "should I buy ", "should I sell ",
     "compare ", "analyze ", "what do you think about ",
     "show my portfolio", "show my positions", "show my orders",
+    "best stock to buy", "trending stocks", "daily movers",
     "portfolio", "positions", "orders", "watchlist",
-    "cancel order", "what is ",
+    "cancel order", "what is ", "watch ",
 ]
 
 
 def _make_completer():
     """Return a readline completer that handles:
-      - .command  tab-expands dot-commands
-      - .model N  tab-expands to numbered model names
-      - TICKER    tab-expands common two-token shorthands
-      - anything  falls back to history-based completion
+      - .command            tab-expands dot-commands
+      - .model N|name       tab-expands numbered/named models
+      - .q / .a / .watch X  tab-expands recent tickers, popular tickers, and company names
+      - watch X below|above tab-expands watch direction and interval keywords
+      - TICKER <suffix>     tab-expands common two-token shorthands (case-insensitive)
+      - anything            falls back to intent phrases and dot-commands
     """
-    # Build a flat list of all completion candidates
-    model_labels = [m[1].lower() for m in MODELS]   # display names
-    model_ids    = [m[0] for m in MODELS]             # full ids
-    model_nums   = [str(i) for i in range(1, len(MODELS)+1)]
+    model_labels = [m[1].lower() for m in MODELS]
+    model_ids    = [m[0] for m in MODELS]
+    model_nums   = [str(i) for i in range(1, len(MODELS) + 1)]
     ticker_sfx   = [
-        "options", "calls", "puts", "rsi", "macd",
+        "price", "quote", "options", "calls", "puts", "rsi", "macd",
         "earnings", "chart", "history", "fundamentals",
-        "analyst", "ratings", "news",
+        "analyst", "ratings", "news", "risk", "below", "above",
     ]
+    static_tickers = sorted(set(_NAME_TO_TICKER.values()))
+    company_names  = sorted(k.lower() for k in _NAME_TO_TICKER.keys())
+    watch_dirs     = ["below", "above"]
+
+    def _ticker_candidates(prefix: str) -> list[str]:
+        up = prefix.upper()
+        low = prefix.lower()
+        out: list[str] = []
+        for sym in _DYNAMIC_TICKERS + static_tickers:
+            if sym.startswith(up) and sym not in out:
+                out.append(sym)
+        for name in company_names:
+            if name.startswith(low):
+                mapped = _NAME_TO_TICKER.get(name.upper())
+                if mapped and mapped not in out:
+                    out.append(mapped)
+                if name not in out:
+                    out.append(name)
+        return out
 
     def completer(text: str, state: int):
         buf  = readline.get_line_buffer()
         word = text  # the current incomplete word
+        low_buf = buf.lower()
 
         # --- .model <N|name> completion ------------------------------------
-        if buf.lower().startswith(".model "):
-            arg = buf[7:]
+        if low_buf.startswith(".model ") or low_buf.startswith(".m "):
+            arg = buf.split(None, 1)[1] if len(buf.split(None, 1)) > 1 else ""
             candidates = model_nums + model_labels + model_ids
             matches = [c for c in candidates if c.lower().startswith(arg.lower())]
-            if state < len(matches):
-                # Replace just the arg part
-                return matches[state]
-            return None
+            return matches[state] if state < len(matches) else None
+
+        # --- .watch / watch <TICKER> <below|above> completion --------------
+        if low_buf.startswith((".watch ", "watch ")):
+            parts = buf.split()
+            trailing_space = buf.endswith(" ")
+            # Completing the 2nd token (direction: below / above)
+            if (len(parts) == 2 and trailing_space) or (len(parts) == 3 and not trailing_space):
+                matches = [d for d in watch_dirs if d.startswith(word.lower())]
+                return matches[state] if state < len(matches) else None
+            # Completing the 1st token (ticker)
+            if (len(parts) == 1 and trailing_space) or (len(parts) == 2 and not trailing_space):
+                matches = _ticker_candidates(word)
+                return matches[state] if state < len(matches) else None
+
+        # --- .q / .quote / .a / .analyze / .risk <TICKER> completion -------
+        if low_buf.startswith((".q ", ".quote ", ".a ", ".analyze ", ".risk ", "analyze ", "compare ", "buy ", "sell ")):
+            clean_word = word.lstrip(",")
+            matches = _ticker_candidates(clean_word)
+            return matches[state] if state < len(matches) else None
 
         # --- dot-command completion ----------------------------------------
         if buf.startswith("."):
-            matches = [c for c in _DOT_COMMANDS if c.startswith(buf)]
-            if state < len(matches):
-                return matches[state]
-            return None
+            matches = [c for c in _DOT_COMMANDS if c.startswith(low_buf)]
+            return matches[state] if state < len(matches) else None
 
-        # --- TICKER <suffix> completion ------------------------------------
-        # If the buffer looks like "WORD " (all-caps word + space), offer suffixes
+        # --- TICKER <suffix> completion (case-insensitive) -----------------
         parts = buf.split()
-        if len(parts) == 1 and parts[0].isupper() and len(parts[0]) <= 5:
-            matches = [s for s in ticker_sfx if s.startswith(word)]
-            if state < len(matches):
-                return matches[state]
-            return None
+        if parts:
+            first_up = parts[0].upper()
+            is_known_sym = (
+                (len(first_up) <= 5 and first_up.isalpha())
+                or first_up in _NAME_TO_TICKER
+            )
+            if is_known_sym and ((len(parts) == 1 and buf.endswith(" ")) or (len(parts) == 2 and not buf.endswith(" "))):
+                matches = [s for s in ticker_sfx if s.startswith(word.lower())]
+                return matches[state] if state < len(matches) else None
 
-        # --- intent phrase completion at start of line --------------------
-        if not buf or word == buf:  # beginning of line
+        # --- beginning of line: intent phrases + dot-commands + tickers ----
+        if not buf or word == buf:
             matches = [
                 p for p in _INTENT_PHRASES + _DOT_COMMANDS
-                if p.startswith(word)
+                if p.lower().startswith(word.lower())
             ]
-            if state < len(matches):
-                return matches[state]
-            return None
+            if word:
+                for t in _ticker_candidates(word):
+                    if t not in matches:
+                        matches.append(t)
+            return matches[state] if state < len(matches) else None
 
         return None
 

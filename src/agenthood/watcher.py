@@ -156,7 +156,32 @@ _TICKER_RE = re.compile(r'\b([A-Z]{1,5})\b')
 _PRICE_RE  = re.compile(r'\$?([\d,]+(?:\.\d+)?)')
 _INTERVAL_RE = re.compile(r'every\s+(\d+)\s*(s(?:ec\w*)?|m(?:in\w*)?|h(?:our\w*)?)\b')
 
-def parse_watch_prompt(prompt: str) -> Optional[dict]:
+_QUESTION_START_RE = re.compile(
+    r"^(is|are|was|were|why|what|how|when\s+did|did|do|does|which|who|where|should\s+i)\b",
+    re.IGNORECASE,
+)
+_POLITE_WATCH_RE = re.compile(
+    r"^(can|could|would|will)\s+you\s+(please\s+)?(watch|alert|notify|buy|sell)\b",
+    re.IGNORECASE,
+)
+
+_WATCH_STOPWORDS = {
+    "AM", "AN", "AS", "AT", "BE", "BY", "DO", "IF", "IN", "IS",
+    "ME", "MY", "NO", "OF", "ON", "OR", "SO", "TO", "UP", "US", "WE",
+    "THE", "AND", "FOR", "ARE", "WAS", "CAN", "YOU", "HIS", "HER", "OUR",
+    "WATCH", "ALERT", "NOTIFY", "BUY", "SELL", "WHEN", "IT", "ITS", "THAT",
+    "THIS", "DROPS", "DROP", "FALLS", "FALL", "RISES", "RISE", "GOES", "GO",
+    "ABOVE", "BELOW", "UNDER", "OVER", "HITS", "HIT", "REACHES", "REACH",
+    "CROSSES", "CROSS", "PRICE", "STOCK", "STOCKS", "SHARE", "SHARES",
+    "EVERY", "UNTIL", "PLEASE", "COULD", "WOULD", "WILL", "WITH", "FROM",
+    "SEC", "SECS", "MIN", "MINS", "HOUR", "HOURS",
+}
+
+
+def parse_watch_prompt(
+    prompt: str,
+    context_ticker: Optional[str] = None,
+) -> Optional[dict]:
     """
     Parse a natural-language watch prompt into a watcher spec dict.
 
@@ -167,28 +192,42 @@ def parse_watch_prompt(prompt: str) -> Optional[dict]:
         "buy 5 NVDA if price falls below 800"
         "sell 20 MSFT when above $450"
         "watch BTC below 80000"
+        "watch it below $180"  (with context_ticker="NVDA")
 
     Returns a dict with keys: ticker, threshold, direction, action, shares
     or None if the prompt cannot be parsed.
     """
+    from .core.tickers import NAME_TO_TICKER
+
     p = prompt.strip()
+    if not p:
+        return None
     pl = p.lower()
+
+    # Reject interrogative questions ("is AAPL above $200?", "why did NVDA drop below $100?")
+    # unless phrased as a polite request ("can you watch AAPL below $180?").
+    if _QUESTION_START_RE.match(pl) and not _POLITE_WATCH_RE.match(pl):
+        return None
+    if p.endswith("?") and not _POLITE_WATCH_RE.match(pl) and not pl.startswith(("watch ", "alert ", "notify ")):
+        return None
 
     # Must be a watch/alert/condition prompt
     _WATCH_KEYWORDS = (
         "watch", "alert", "notify", "when it", "when price", "if price",
         "if it", "drops below", "falls below", "rises above", "goes above",
+        "falls under", "drops under", "goes under",
         "hits ", "reaches ", "crosses",
         # bare "when above / below" and "if above / below"
         "when above", "when below", "if above", "if below",
-        "above $", "below $",
+        "when under", "if under",
+        "above $", "below $", "under $",
     )
     if not any(kw in pl for kw in _WATCH_KEYWORDS):
         return None
 
     # Direction
     direction = "below"
-    if any(kw in pl for kw in ("above", "rises", "goes above", "hits", "reaches")):
+    if any(kw in pl for kw in ("above", "rises", "goes above", "hits", "reaches", "over")):
         direction = "above"
     if any(kw in pl for kw in ("below", "drops", "falls", "under")):
         direction = "below"
@@ -205,21 +244,8 @@ def parse_watch_prompt(prompt: str) -> Optional[dict]:
         action = "sell"
         shares = int(sell_match.group(1))
 
-    # Ticker — first uppercase word that looks like a ticker
-    tickers = _TICKER_RE.findall(p.upper())
-    _STOP = {"AM", "AN", "AS", "AT", "BE", "BY", "DO", "IF", "IN", "IS",
-             "ME", "MY", "TO", "UP", "US", "WE", "THE", "AND", "FOR",
-             "WATCH", "ALERT", "NOTIFY", "BUY", "SELL", "WHEN", "IT",
-             "DROPS", "FALLS", "RISES", "GOES", "ABOVE", "BELOW"}
-    tickers = [t for t in tickers if t not in _STOP]
-    if not tickers:
-        return None
-    ticker = tickers[0]
-
     # Optional poll interval: "every 5 minutes" / "every 30 seconds" / "every 2m".
-    # Parsed BEFORE the price and cut out of the string: the threshold is taken as
-    # the last number, so leaving "every 5 minutes" in place made
-    # "watch AAPL below $180 every 5 minutes" a $5 threshold that fired at once.
+    # Parsed BEFORE the price and ticker so interval units don't pollute either.
     interval = 30
     iv_m = _INTERVAL_RE.search(pl)
     if iv_m:
@@ -232,6 +258,44 @@ def parse_watch_prompt(prompt: str) -> Optional[dict]:
             interval = n
         p = p[:iv_m.start()] + p[iv_m.end():]
 
+    # Ticker resolution:
+    # 1. Known company/crypto names (handles 6+ letter names like "Nvidia", "Bitcoin", and 5-letter "Apple")
+    # 2. Explicitly uppercase 1-5 letter tokens in the original prompt
+    # 3. Any remaining 1-5 letter non-stopword tokens
+    # 4. Context ticker if prompt uses "it" / "that"
+    ticker: Optional[str] = None
+    words = [w.strip("?!.,;:$'\"()[]{}") for w in p.split()]
+    words = [w for w in words if w]
+
+    # Check known company names first
+    for w in words:
+        up = w.upper()
+        if up in NAME_TO_TICKER and up not in _WATCH_STOPWORDS:
+            ticker = NAME_TO_TICKER[up]
+            break
+
+    # Next, check words the user typed in uppercase
+    if ticker is None:
+        for w in words:
+            up = w.upper()
+            if w.isupper() and _TICKER_RE.fullmatch(up) and up not in _WATCH_STOPWORDS:
+                ticker = NAME_TO_TICKER.get(up, up)
+                break
+
+    # Next, check any 1-5 letter non-stopword token
+    if ticker is None:
+        for t in _TICKER_RE.findall(p.upper()):
+            if t not in _WATCH_STOPWORDS:
+                ticker = NAME_TO_TICKER.get(t, t)
+                break
+
+    # Finally, check pronoun reference to context_ticker
+    if ticker is None and context_ticker and re.search(r"\b(it|that)\b", pl):
+        ticker = context_ticker.upper()
+
+    if not ticker:
+        return None
+
     # Threshold price — last number in what's left (most likely to be the price)
     prices = _PRICE_RE.findall(p)
     if not prices:
@@ -243,3 +307,4 @@ def parse_watch_prompt(prompt: str) -> Optional[dict]:
 
     return dict(ticker=ticker, threshold=threshold, direction=direction,
                 action=action, shares=shares, interval=interval)
+

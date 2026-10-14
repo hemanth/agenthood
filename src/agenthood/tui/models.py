@@ -17,13 +17,12 @@ from .theme import (
 MODELS: list[tuple[str, str, str, str, str]] = [
     # (model_id, display_label, provider, speed, note)
     # --- OpenRouter free (ranked by tool-calling benchmark) ------------------
-    ("meta-llama/llama-3.3-70b-instruct:free","Llama 3.3 70B",     "openrouter", "fast",   "#1 free: best JSON tool-call accuracy"),
-    ("openai/gpt-oss-120b:free",              "GPT-OSS 120B",      "openrouter", "fast",   "#2 free: built for agentic tool-use"),
-    ("openai/gpt-oss-20b:free",               "GPT-OSS 20B",       "openrouter", "fast",   "#3 free: fast, reliable tool-calls"),
-    ("qwen/qwen3-coder:free",                 "Qwen3 Coder",       "openrouter", "fast",   "#4 free: strong agent/function-call"),
-    ("deepseek/deepseek-r1-0528:free",        "DeepSeek R1-0528",  "openrouter", "medium", "#5 free: best reasoning + tool calls"),
-    ("google/gemini-flash-1.5:free",          "Gemini 1.5 Flash",  "openrouter", "fast",   "#6 free: long context, fast"),
-    ("mistralai/mistral-7b-instruct:free",    "Mistral 7B",        "openrouter", "fast",   "#7 free: lightweight"),
+    ("nvidia/nemotron-3-super-120b-a12b:free","Nemotron 3 120B",   "openrouter", "fast",   "#1 free: strong tool-calls & analysis"),
+    ("google/gemma-4-26b-a4b-it:free",        "Gemma 4 26B",       "openrouter", "fast",   "#2 free: fast MoE instruct"),
+    ("google/gemma-4-31b-it:free",            "Gemma 4 31B",       "openrouter", "fast",   "#3 free: strong reasoning"),
+    ("nvidia/nemotron-3-ultra-550b-a55b:free","Nemotron 3 550B",   "openrouter", "medium", "#4 free: highest capacity"),
+    ("nvidia/nemotron-3.5-lightning:free",    "Nemotron Lightning","openrouter", "fast",   "#5 free: ultra-low latency"),
+    ("cohere/north-mini-code:free",           "Cohere North Mini", "openrouter", "fast",   "#6 free: lightweight"),
     # --- OpenRouter paid ------------------------------------------------------
     ("openai/gpt-4o",                         "GPT-4o",            "openrouter", "medium", "best all-round"),
     ("openai/o3-mini",                        "o3-mini",           "openrouter", "medium", "strong reasoning"),

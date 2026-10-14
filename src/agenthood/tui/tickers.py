@@ -1,20 +1,8 @@
 """Resolve company names typed by the user into ticker symbols."""
 from __future__ import annotations
 
-# Common company name -> ticker mappings
-_NAME_TO_TICKER: dict[str, str] = {
-    "APPLE": "AAPL", "GOOGLE": "GOOGL", "ALPHABET": "GOOGL",
-    "MICROSOFT": "MSFT", "AMAZON": "AMZN", "META": "META",
-    "FACEBOOK": "META", "TESLA": "TSLA", "NVIDIA": "NVDA",
-    "NETFLIX": "NFLX", "PAYPAL": "PYPL", "AMD": "AMD",
-    "INTEL": "INTC", "DISNEY": "DIS", "WALMART": "WMT",
-    "JPMORGAN": "JPM", "BERKSHIRE": "BRK.B", "VISA": "V",
-    "MASTERCARD": "MA", "SALESFORCE": "CRM", "UBER": "UBER",
-    "SPOTIFY": "SPOT", "AIRBNB": "ABNB", "COINBASE": "COIN",
-    "ROBINHOOD": "HOOD", "SNAP": "SNAP", "PINTEREST": "PINS",
-    "PALANTIR": "PLTR", "SNOWFLAKE": "SNOW", "CROWDSTRIKE": "CRWD",
-    "SHOPIFY": "SHOP", "SQUARE": "XYZ", "BLOCK": "XYZ",
-}
+from ..core.tickers import NAME_TO_TICKER as _NAME_TO_TICKER
+
 
 
 async def _resolve_ticker(agent, sym: str) -> str:

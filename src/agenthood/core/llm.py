@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 TEMPERATURE = 0.3
-MAX_TOKENS = 800
+MAX_TOKENS = 2500
 
 # An interactive prompt cannot honour a multi-minute retry-after, so cap backoff
 # and degrade instead of hanging.
@@ -64,7 +64,7 @@ def reset_cooldowns() -> None:
     _cooldowns.clear()
 
 CONVERSE_TEMPERATURE = 0.4
-CONVERSE_MAX_TOKENS = 500
+CONVERSE_MAX_TOKENS = 1200
 
 OLLAMA_BASE = "http://localhost:11434/v1"
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"

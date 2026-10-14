@@ -39,9 +39,14 @@ def _format_mcp_response(raw: str, title: str) -> str:
         results = data.get("results", [])
         if not results:
             return f"## {title}\n\nNo open positions."
-        lines = [f"## {title}", "| Symbol | Qty | Avg Cost | Current | P/L |", "|---|---|---|---|---|"]
-        for pos in results:
+        lines = [
+            f"## {title}",
+            "| # | Symbol | Qty | Avg Cost | Current | P/L |",
+            "|---|---|---|---|---|---|",
+        ]
+        for idx, pos in enumerate(results, start=1):
             sym = pos.get("symbol", "?")
+            link = f"[{sym}](https://robinhood.com/stocks/{sym})" if sym != "?" else sym
             qty = pos.get("quantity", "0")
             avg = pos.get("average_buy_price", "?")
             cur = pos.get("current_price", "?")
@@ -55,7 +60,7 @@ def _format_mcp_response(raw: str, title: str) -> str:
                 cur = f"${float(cur):,.2f}"
             except (ValueError, TypeError):
                 pass
-            lines.append(f"| {sym} | {qty} | {avg} | {cur} | {pl_str} |")
+            lines.append(f"| {idx} | **{link}** | {qty} | {avg} | {cur} | {pl_str} |")
         return "\n".join(lines)
 
     # Quote response
@@ -63,22 +68,101 @@ def _format_mcp_response(raw: str, title: str) -> str:
         results = data.get("results", [data])
         if not results:
             return f"## {title}\n\nNo data."
-        lines = [f"## {title}", "| Metric | Value |", "|---|---|"]
-        q = results[0] if isinstance(results[0], dict) else results[0]
-        if isinstance(q, dict):
-            q = q.get("quote", q)
-        for key in ["symbol", "last_trade_price", "previous_close",
-                     "bid_price", "ask_price", "last_extended_hours_trade_price"]:
-            val = q.get(key)
-            if val is not None:
-                label = key.replace("_", " ").title()
+
+        def _extract_q(entry):
+            q = entry.get("quote", entry) if isinstance(entry, dict) else {}
+            sym = q.get("symbol", "?")
+            last_raw = q.get("last_trade_price")
+            prev_raw = q.get("adjusted_previous_close") or q.get("previous_close")
+            bid_raw = q.get("bid_price")
+            ask_raw = q.get("ask_price")
+            ext_raw = q.get("last_extended_hours_trade_price")
+
+            try:
+                cur = float(last_raw) if last_raw is not None else None
+            except (ValueError, TypeError):
+                cur = None
+            try:
+                prev = float(prev_raw) if prev_raw is not None else None
+            except (ValueError, TypeError):
+                prev = None
+
+            chg_str = "N/A"
+            verdict = "HOLD"
+            if cur is not None and prev and prev > 0:
+                chg = cur - prev
+                pct = (chg / prev) * 100
+                sign = "+" if chg >= 0 else "-"
+                chg_str = f"{sign}${abs(chg):,.2f} ({'+' if chg >= 0 else ''}{pct:.2f}%)"
+                if pct > 1.5:
+                    verdict = "BUY"
+                elif pct < -1.5:
+                    verdict = "SELL"
+
+            def _fmt_p(v):
+                if v is None:
+                    return "-"
                 try:
-                    if key != "symbol":
-                        val = f"${float(val):,.2f}"
+                    return f"${float(v):,.2f}"
                 except (ValueError, TypeError):
-                    pass
-                lines.append(f"| {label} | {val} |")
-        return "\n".join(lines) if len(lines) > 3 else f"## {title}\n\n{str(data)[:2000]}"
+                    return str(v)
+
+            return {
+                "symbol": sym,
+                "last": _fmt_p(last_raw),
+                "prev": _fmt_p(prev_raw),
+                "bid": _fmt_p(bid_raw),
+                "ask": _fmt_p(ask_raw),
+                "ext": _fmt_p(ext_raw) if ext_raw is not None else None,
+                "change": chg_str,
+                "verdict": verdict,
+            }
+
+        parsed_quotes = [_extract_q(r) for r in results if isinstance(r, dict)]
+        if not parsed_quotes:
+            return f"## {title}\n\nNo data."
+
+        # Multi-ticker side-by-side table
+        if len(parsed_quotes) > 1:
+            lines = [
+                f"## {title}",
+                "| # | Symbol | Price | Day Change | Bid / Ask | Prev Close | Verdict |",
+                "|---|---|---|---|---|---|---|",
+            ]
+            for idx, pq in enumerate(parsed_quotes, start=1):
+                sym = pq["symbol"]
+                link = f"[{sym}](https://robinhood.com/stocks/{sym})" if sym != "?" else sym
+                lines.append(
+                    f"| {idx} | **{link}** | {pq['last']} | {pq['change']} | "
+                    f"{pq['bid']} / {pq['ask']} | {pq['prev']} | **{pq['verdict']}** |"
+                )
+            lines.append("\n*Tip: type `1`..`N` for instant quote or `.a 1` to analyze row #1.*")
+            return "\n".join(lines)
+
+        # Single-ticker detailed table
+        pq = parsed_quotes[0]
+        sym = pq["symbol"]
+        link = f"[{sym}](https://robinhood.com/stocks/{sym})" if sym != "?" else sym
+        lines = [
+            f"## {title}",
+            "| Metric | Value |",
+            "|---|---|",
+            f"| Symbol | **{link}** |",
+            f"| Last Trade Price | {pq['last']} |",
+        ]
+        if pq["change"] != "N/A":
+            lines.append(f"| Day Change | {pq['change']} |")
+        if pq["prev"] != "-":
+            lines.append(f"| Previous Close | {pq['prev']} |")
+        if pq["bid"] != "-":
+            lines.append(f"| Bid Price | {pq['bid']} |")
+        if pq["ask"] != "-":
+            lines.append(f"| Ask Price | {pq['ask']} |")
+        if pq["ext"]:
+            lines.append(f"| Extended Hours | {pq['ext']} |")
+        lines.append(f"| Verdict | **{pq['verdict']}** |")
+        return "\n".join(lines)
 
     # Fallback: dump as readable text
     return f"## {title}\n\n{json.dumps(data, indent=2)[:2000]}"
+

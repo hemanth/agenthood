@@ -163,6 +163,18 @@ class TestEnvOverrides:
         cfg = load_config(str(tmp_path / "x.json"))
         assert cfg.model == "ollama/llama3"
 
+    def test_openrouter_key_upgrades_default_ollama_model_to_openrouter_model(self, monkeypatch, tmp_path):
+        """Regression: OPENROUTER_API_KEY set api_base to OpenRouter but left model='qwen3' (400 Bad Request)."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.delenv("AGENTHOOD_MODEL", raising=False)
+        cfg = load_config(str(tmp_path / "x.json"))
+        assert "openrouter.ai" in cfg.api_base
+        assert "/" in cfg.model and cfg.model != "qwen3"
+        assert cfg.model_fallbacks
+
+
 
 # ── JWT helper ────────────────────────────────────────────────────────────────
 

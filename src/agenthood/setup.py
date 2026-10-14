@@ -114,13 +114,12 @@ LLM_PROVIDERS = [
 ]
 
 OPENROUTER_FREE_MODELS = [
-    ("meta-llama/llama-3.3-70b-instruct:free", "(Recommended) 70B • 128K ctx • #1 tool-call accuracy"),
-    ("openai/gpt-oss-120b:free",               "120B • 131K ctx • built for agentic tool-use"),
-    ("openai/gpt-oss-20b:free",                " 20B • 131K ctx • fast, reliable tool-calls"),
-    ("qwen/qwen3-coder:free",                  "Qwen3 Coder • strong agent/function-call"),
-    ("deepseek/deepseek-r1-0528:free",         "R1-0528 • best reasoning + tool calls"),
-    ("google/gemini-flash-1.5:free",           "Gemini Flash • long context, fast"),
-    ("mistralai/mistral-7b-instruct:free",     " 7B • 32K ctx • lightweight"),
+    ("nvidia/nemotron-3-super-120b-a12b:free", "(Recommended) 120B • fast, reliable tool-calls & analysis"),
+    ("google/gemma-4-26b-a4b-it:free",         "Gemma 4 26B • fast MoE instruct"),
+    ("google/gemma-4-31b-it:free",             "Gemma 4 31B • strong reasoning & formatting"),
+    ("nvidia/nemotron-3-ultra-550b-a55b:free", "Nemotron 3 Ultra 550B • deep analysis"),
+    ("nvidia/nemotron-3.5-lightning:free",     "Nemotron 3.5 Lightning • low latency"),
+    ("cohere/north-mini-code:free",            "Cohere North Mini • lightweight & fast"),
 ]
 
 
