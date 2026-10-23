@@ -50,7 +50,26 @@ NAME_TO_TICKER: dict[str, str] = {
     "SHOPIFY": "SHOP", "SQUARE": "XYZ", "BLOCK": "XYZ",
     "BROADCOM": "AVGO", "COSTCO": "COST", "ORACLE": "ORCL",
     "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL", "DOGECOIN": "DOGE",
+    "DOGE": "DOGE", "RIPPLE": "XRP", "CARDANO": "ADA", "AVALANCHE": "AVAX",
+    "SHIBA": "SHIB", "POLKADOT": "DOT", "CHAINLINK": "LINK", "LITECOIN": "LTC",
+    "UNISWAP": "UNI", "STELLAR": "XLM", "PEPE": "PEPE", "BONK": "BONK",
 }
+
+KNOWN_CRYPTO_SYMBOLS: set[str] = {
+    "BTC", "ETH", "SOL", "DOGE", "XRP", "ADA", "AVAX", "SHIB", "DOT", "LINK",
+    "XDC", "LTC", "BCH", "UNI", "PEPE", "BONK", "SUI", "APT", "NEAR", "ATOM",
+    "MATIC", "POL", "ARB", "OP", "ETC", "XLM", "HBAR", "TRUMP",
+}
+
+
+def is_crypto_symbol(sym: str) -> bool:
+    """Return True if *sym* (or its base symbol without -USD/USD) is a known crypto asset."""
+    s = sym.strip().upper()
+    if s.endswith("-USD"):
+        s = s[:-4]
+    elif len(s) > 3 and s.endswith("USD"):
+        s = s[:-3]
+    return s in KNOWN_CRYPTO_SYMBOLS
 
 # Unambiguous multi-letter company names safe to match case-insensitively in prose
 # (excludes common English words like "apple" only when not in a market query? No,
@@ -116,6 +135,9 @@ def extract_tickers(
             sym = NAME_TO_TICKER[up]
             if sym not in found:
                 found.append(sym)
+        elif up in KNOWN_CRYPTO_SYMBOLS and up not in {"DOT", "NEAR", "OP", "ATOM", "LINK"} and _MARKET_HINT_RE.search(stripped):
+            if up not in found:
+                found.append(up)
 
     if not found and context_ticker and _PRONOUN_RE.search(stripped) and _MARKET_HINT_RE.search(stripped):
         found.append(context_ticker.upper())

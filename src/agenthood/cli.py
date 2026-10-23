@@ -514,6 +514,14 @@ async def main() -> None:
                         print(response.get("error", str(response)))
                 else:
                     _print_rich(response)
+                    if getattr(agent, "_pending_crypto_order", None) is not None and sys.stdin.isatty():
+                        try:
+                            ans = input("\nConfirm order? (yes/no): ").strip()
+                        except (EOFError, KeyboardInterrupt):
+                            ans = "no"
+                        followup = await agent.chat(ans or "no")
+                        print()
+                        _print_rich(followup)
             return
 
         # Determine session name

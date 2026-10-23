@@ -27,7 +27,13 @@ def _lookback_start() -> str:
 
 def _sources(sym: str) -> list[tuple[str, str, dict]]:
     """The (label, tool base name, params) triples analyze() pulls."""
+    from .tickers import is_crypto_symbol
     start = _lookback_start()
+    if is_crypto_symbol(sym):
+        pair = sym if sym.endswith("USD") else f"{sym}-USD"
+        return [
+            ("quotes", "get_crypto_quotes", {"symbols": [pair]}),
+        ]
     return [
         ("quotes", "get_equity_quotes", {"symbols": [sym]}),
         ("fundamentals", "get_equity_fundamentals", {"symbols": [sym]}),

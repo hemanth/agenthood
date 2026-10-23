@@ -34,6 +34,7 @@ KNOWN_DOT_COMMANDS = (
     ".risk",
     ".watches", ".watch",
     ".history", ".status",
+    ".live", ".dry",
     ".tools", ".help",
     ".model", ".m",
     ".sessions", ".session",
@@ -152,6 +153,18 @@ def handle_meta(cmd: str, agent) -> bool | str | tuple | list:
                     first_line = str(text).strip().splitlines()[0] if str(text).strip() else ""
                     rows[f"#{turn_idx} agent"] = first_line[:80]
             _show_table(rows, "recent history")
+        return True
+
+    if lower in (".live", ".dry", ".dry-run"):
+        want_dry = lower != ".live"
+        setter = getattr(agent, "set_dry_run", None)
+        if callable(setter):
+            setter(want_dry)
+        elif getattr(agent, "config", None) is not None:
+            agent.config.dry_run = want_dry
+        mode_str = "DRY-RUN (safe simulation)" if want_dry else "LIVE (real orders enabled after preview + confirmation)"
+        color = C_DIM if want_dry else C_WARN
+        console.print(f"  [{color}]trading mode -> {mode_str}[/{color}]")
         return True
 
     if lower == ".status":

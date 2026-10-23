@@ -65,3 +65,29 @@ def test_do_refresh_returns_new_access_token(tmp_path):
 
     assert tok == "fresh-jwt-token"
     assert json.loads(token_file.read_text())["access_token"] == "fresh-jwt-token"
+
+
+def test_get_valid_token_refreshes_on_cold_start(tmp_path):
+    """Regression: on cold start (self._tokens empty), get_valid_token returned
+    self.load() directly without checking expiry or refreshing."""
+    from agenthood.token import TokenManager
+
+    token_file = tmp_path / "abc_tokens.json"
+    client_file = tmp_path / "abc_client_info.json"
+    expired_payload = base64.urlsafe_b64encode(
+        json.dumps({"aud": "robinhood", "exp": 1000}).encode()
+    ).decode().rstrip("=")
+    expired_jwt = f"h.{expired_payload}.s"
+    token_file.write_text(json.dumps({"access_token": expired_jwt, "refresh_token": "ref-cold"}))
+    client_file.write_text(json.dumps({"client_id": "client-cold"}))
+
+    tm = TokenManager()
+    with patch("agenthood.token._find_token_file", return_value=token_file), \
+         patch("agenthood.token._refresh_token", return_value={"access_token": "refreshed-on-cold-start"}):
+        tok = tm.get_valid_token()
+
+    assert tok == "refreshed-on-cold-start"
+    saved = json.loads(token_file.read_text())
+    assert saved["access_token"] == "refreshed-on-cold-start"
+    assert saved["refresh_token"] == "ref-cold"
+

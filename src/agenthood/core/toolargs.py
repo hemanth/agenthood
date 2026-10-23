@@ -84,16 +84,41 @@ def coerce_value(value: Any, types: set[str]) -> Any:
     return value
 
 
-def coerce_args(parameters: dict | None, kwargs: dict) -> dict:
+def _normalize_crypto_quote_symbol(sym: Any) -> Any:
+    if not isinstance(sym, str):
+        return sym
+    s = sym.strip().upper()
+    if not s:
+        return sym
+    if s.endswith("-USD") or s.endswith("USD"):
+        return s
+    return f"{s}-USD"
+
+
+def coerce_args(parameters: dict | None, kwargs: dict, tool_name: str = "") -> dict:
     """Return *kwargs* with values coerced to the types *parameters* declares."""
-    if not parameters:
-        return kwargs
-    fixed = {}
-    for name, value in kwargs.items():
-        new = coerce_value(value, declared_types(parameters.get(name)))
-        if new is not value and new != value:
-            logger.debug("coerced arg %s: %r -> %r", name, value, new)
-        fixed[name] = new
+    fixed = dict(kwargs)
+    if parameters:
+        # Map account_number -> rhs_account_number for crypto endpoints
+        if (
+            "rhs_account_number" in parameters
+            and "rhs_account_number" not in fixed
+            and "account_number" in fixed
+        ):
+            fixed["rhs_account_number"] = fixed["account_number"]
+            if "account_number" not in parameters:
+                fixed.pop("account_number", None)
+
+        for name, value in list(fixed.items()):
+            new = coerce_value(value, declared_types(parameters.get(name)))
+            if new is not value and new != value:
+                logger.debug("coerced arg %s: %r -> %r", name, value, new)
+            fixed[name] = new
+
+    # Robinhood get_crypto_quotes requires pair symbols ("DOGE-USD" or "DOGEUSD")
+    if tool_name.endswith("get_crypto_quotes") and isinstance(fixed.get("symbols"), list):
+        fixed["symbols"] = [_normalize_crypto_quote_symbol(s) for s in fixed["symbols"]]
+
     return fixed
 
 
@@ -105,14 +130,15 @@ def wrap_tool(tool) -> None:
     """
     original = tool.function
     params = getattr(tool, "parameters", None)
+    t_name = str(getattr(tool, "name", "") or "")
 
     if inspect.iscoroutinefunction(original):
         @functools.wraps(original)
         async def wrapper(**kwargs):
-            return await original(**coerce_args(params, kwargs))
+            return await original(**coerce_args(params, kwargs, tool_name=t_name))
     else:
         @functools.wraps(original)
         def wrapper(**kwargs):
-            return original(**coerce_args(params, kwargs))
+            return original(**coerce_args(params, kwargs, tool_name=t_name))
 
     tool.function = wrapper

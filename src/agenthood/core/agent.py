@@ -53,7 +53,7 @@ from .llm import analyze_llm_config, converse, llm_completion, stream_completion
 from .market_data import fetch_market_data
 from .prompts import SYSTEM_PROMPT, analyze_prompt
 from .response import _extract_response
-from .tickers import extract_tickers
+from .tickers import KNOWN_CRYPTO_SYMBOLS, extract_tickers, is_crypto_symbol
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)  # only show warnings/errors unless caller enables debug
@@ -139,6 +139,11 @@ _SIMPLE_QUOTE_INTENT_RE = _re.compile(
     r"quote\s+(for\s+)?[a-z0-9.,\s]+\??)$",
     _re.IGNORECASE,
 )
+_CRYPTO_ORDER_VERB_RE = _re.compile(r"\b(buy|sell|purchase|order)\b", _re.IGNORECASE)
+_CRYPTO_WORD_RE = _re.compile(r"\b(crypto|cryto|cryptocurrency|coin|coins)\b", _re.IGNORECASE)
+_DOLLAR_AMT_RE = _re.compile(r"(?:\$\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:dollars?|usd|bucks?)\b)", _re.IGNORECASE)
+_QTY_BEFORE_SYM_RE = _re.compile(r"\b(?:buy|sell|purchase)\s+(\d+(?:\.\d+)?)\s+(?!dollars?|usd|bucks?)([a-zA-Z]{2,10})\b", _re.IGNORECASE)
+_LIMIT_AT_RE = _re.compile(r"\b(?:at|@|limit)\s*\$?\s*(\d+(?:\.\d+)?)\b", _re.IGNORECASE)
 
 
 def _is_order_confirm_pending(history: list[tuple[str, str]]) -> bool:
@@ -210,8 +215,25 @@ class AgentHood(AgentuFacade):
         self._cost_tracker = None   # filled in start()
         self._session_manager = None
         self._account_number: str | None = None
+        self._rhs_account_number: str | None = None
+        self._pending_crypto_order: dict[str, Any] | None = None
         self._history: list[tuple[str, str]] = []
         self._recent_tickers: list[str] = []
+
+    def set_dry_run(self, dry_run: bool) -> None:
+        """Toggle dry_run mode dynamically and re-bind safety hooks on the active agent."""
+        self.config.dry_run = bool(dry_run)
+        if self._agent is not None:
+            try:
+                from ..hooks import trading_guard
+                guard = trading_guard(
+                    dry_run=self.config.dry_run,
+                    max_order_value=self.config.max_order_value,
+                    allowed_symbols=self.config.allowed_symbols,
+                )
+                self._agent.with_hooks(pre_tool=guard)
+            except Exception as exc:
+                logger.debug("Could not re-bind trading_guard: %s", exc)
 
     @property
     def last_ticker(self) -> str | None:
@@ -349,7 +371,185 @@ class AgentHood(AgentuFacade):
             chosen = accounts[0]
         acct = chosen.get("account_number") or chosen.get("id") or ""
         self._account_number = acct
+        self._rhs_account_number = str(chosen.get("rhs_account_number") or acct)
         return acct
+
+    async def _get_rhs_account_number(self) -> str:
+        """Fetch the numeric rhs_account_number required by Robinhood crypto tools."""
+        if getattr(self, "_rhs_account_number", None):
+            return self._rhs_account_number  # type: ignore[return-value]
+        await self._get_account_number()
+        return getattr(self, "_rhs_account_number", None) or self._account_number or ""
+
+    async def _preview_crypto_order_intent(
+        self,
+        prompt: str,
+        crypto_syms: list[str],
+        _progress: Optional[Callable[[str], None]] = None,
+    ) -> str | None:
+        """Preview a crypto order via robinhood_preview_crypto_order and prompt for confirmation.
+
+        Adheres strictly to AGENTS.md Safety Rules:
+          1. Never places an order without a prior preview call.
+          2. Always asks explicit confirmation ("Confirm? (yes/no)").
+          3. Includes an explicit high-risk crypto warning.
+          4. Prefers limit orders unless the user explicitly requested a market order.
+          5. Explains dry_run mode when active.
+        """
+        import json as _j
+
+        sym = crypto_syms[0].upper() if crypto_syms else "DOGE"
+        if sym.endswith("-USD"):
+            sym = sym[:-4]
+        elif len(sym) > 3 and sym.endswith("USD"):
+            sym = sym[:-3]
+
+        low = prompt.lower()
+        side = "sell" if _re.search(r"\bsell\b", low) else "buy"
+        order_type = "market" if _re.search(r"\bmarket\b", low) else "limit"
+
+        dollar_amt: str | None = None
+        quantity: str | None = None
+        m_dollar = _DOLLAR_AMT_RE.search(prompt)
+        m_qty = _QTY_BEFORE_SYM_RE.search(prompt)
+        if m_dollar:
+            val = float(m_dollar.group(1) or m_dollar.group(2))
+            dollar_amt = f"{val:.2f}"
+        elif m_qty:
+            quantity = m_qty.group(1)
+        else:
+            dollar_amt = "1.00"
+
+        if _progress:
+            _progress(f"fetching {sym}-USD quote & account for preview...")
+
+        rhs_acct = await self._get_rhs_account_number()
+
+        # Fetch live crypto quote to determine current ask/bid price for limit orders
+        pair = f"{sym}-USD"
+        q_raw = await self._call_tool_direct("robinhood_get_crypto_quotes", {"symbols": [pair]})
+        q_data = _j.loads(q_raw) if isinstance(q_raw, str) else q_raw
+        q_results = ((q_data.get("data") or q_data).get("results") if isinstance(q_data, dict) else None) or []
+        first_q = q_results[0] if q_results and isinstance(q_results[0], dict) else {}
+
+        ask_px = float(first_q.get("ask_price") or first_q.get("mark_price") or 0.0)
+        bid_px = float(first_q.get("bid_price") or first_q.get("mark_price") or 0.0)
+        ref_px = ask_px if side == "buy" else bid_px
+
+        m_lim = _LIMIT_AT_RE.search(prompt)
+        if m_lim:
+            ref_px = float(m_lim.group(1))
+
+        if ref_px <= 0:
+            order_type = "market"
+
+        preview_params: dict[str, Any] = {
+            "rhs_account_number": rhs_acct,
+            "symbol": sym,
+            "side": side,
+            "type": order_type,
+        }
+        if dollar_amt is not None:
+            preview_params["dollar_amount"] = dollar_amt
+        elif quantity is not None:
+            preview_params["quantity"] = quantity
+
+        if order_type == "limit" and ref_px > 0:
+            if ref_px < 0.01:
+                lim_str = f"{ref_px:.6f}"
+            elif ref_px < 1.0:
+                lim_str = f"{ref_px:.4f}"
+            else:
+                lim_str = f"{ref_px:.2f}"
+            preview_params["limit_price"] = lim_str
+            preview_params["time_in_force"] = "gtc"
+
+        if _progress:
+            _progress(f"previewing {sym} {order_type} {side} order...")
+
+        prev_raw = await self._call_tool_direct("robinhood_preview_crypto_order", preview_params)
+        prev_str = prev_raw if isinstance(prev_raw, str) else _j.dumps(prev_raw)
+        prev_data = _j.loads(prev_str) if isinstance(prev_str, str) else {}
+        inner = (prev_data.get("data") or prev_data) if isinstance(prev_data, dict) else {}
+        ord_obj = inner.get("order") if isinstance(inner, dict) else None
+        if not isinstance(ord_obj, dict):
+            err_msg = prev_data.get("error") or inner.get("error") or prev_str[:400]
+            return f"Could not preview {sym} crypto order: {err_msg}"
+
+        est_qty = ord_obj.get("quantity") or quantity or "?"
+        px_val = ord_obj.get("price") or preview_params.get("limit_price") or str(ref_px)
+        notional_val = ord_obj.get("net_rounded_estimated_notional") or dollar_amt or "?"
+
+        self._pending_crypto_order = {
+            "params": preview_params,
+            "symbol": sym,
+            "side": side,
+            "type": order_type,
+            "quantity": est_qty,
+            "price": px_val,
+            "notional": notional_val,
+        }
+
+        table_md = _format_tool_result("robinhood_preview_crypto_order", prev_str) or prev_str
+        lines = [
+            "**Risk Warning:** Cryptocurrency is a high-risk, volatile asset class that trades 24/7 without FDIC or SIPC protection.",
+        ]
+        if getattr(self.config, "dry_run", True):
+            lines.append(
+                "\n> **DRY-RUN MODE ACTIVE:** Live order placement is disabled by default. "
+                "Confirming below will simulate the order. To place a real order, run `agenthood --live` or type `.live` in the REPL."
+            )
+        lines.append("")
+        lines.append(table_md)
+        lines.append(
+            "\n*You can switch between Market Maker Routing and Exchange Routing anytime in the Robinhood app under Settings -> Crypto -> Fee Tiers.*"
+        )
+        try:
+            px_f = float(px_val)
+            px_disp = f"${px_f:,.4f}" if 0 < abs(px_f) < 1.0 else f"${px_f:,.2f}"
+        except (ValueError, TypeError):
+            px_disp = f"${px_val}"
+        lines.append(
+            f"\nI'm about to place a **{order_type.upper()} {side.upper()}** order for **{est_qty} {sym}** "
+            f"(~${notional_val} at {px_disp}, GTC). Confirm? (yes/no)"
+        )
+        return "\n".join(lines)
+
+    async def _execute_pending_crypto_order(
+        self,
+        pending: dict[str, Any],
+        _progress: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Execute (or simulate in dry_run) a confirmed crypto order."""
+        import json as _j
+        from ..hooks import HookAction, trading_guard
+
+        params = pending["params"]
+        sym = pending["symbol"]
+        guard = trading_guard(
+            dry_run=getattr(self.config, "dry_run", True),
+            max_order_value=getattr(self.config, "max_order_value", 500.0),
+            allowed_symbols=getattr(self.config, "allowed_symbols", []),
+        )
+        hook_res = await guard("robinhood_place_crypto_order", params, {})
+        if hook_res.action == HookAction.DENY:
+            return (
+                f"### Order Blocked by Safety Guard\n\n"
+                f"{hook_res.reason}\n\n"
+                f"- **Simulated Order:** {pending['type'].upper()} {pending['side'].upper()} "
+                f"{pending['quantity']} {sym} (~${pending['notional']})\n"
+                f"- **Tip:** Run `agenthood --live` or type `.live` in the REPL to enable live trading."
+            )
+
+        if _progress:
+            _progress(f"placing live {sym} {pending['type']} {pending['side']} order...")
+
+        raw = await self._call_tool_direct("robinhood_place_crypto_order", params)
+        raw_str = raw if isinstance(raw, str) else _j.dumps(raw)
+        formatted = _format_tool_result("robinhood_place_crypto_order", raw_str)
+        if formatted:
+            return f"**Live Crypto Order Submitted**\n\n{formatted}"
+        return f"**Live Crypto Order Submitted**\n\n{raw_str[:1000]}"
 
     async def _direct_dispatch(self, user_input: str) -> dict | None:
         """Check for watch/alert prompts (structural, not intent-based).
@@ -407,6 +607,26 @@ class AgentHood(AgentuFacade):
         # Step 1b: multi-turn order confirmation / cancellation handling
         stripped = prompt.strip()
         infer_prompt = prompt
+        pending_crypto = getattr(self, "_pending_crypto_order", None)
+        if output_schema is None and pending_crypto is not None:
+            if _CONFIRM_NO_RE.match(stripped):
+                self._pending_crypto_order = None
+                msg = "Order cancelled. No order was placed."
+                self.record_turn(prompt, msg)
+                return msg
+            if _CONFIRM_YES_RE.match(stripped):
+                self._pending_crypto_order = None
+                try:
+                    exec_md = await self._execute_pending_crypto_order(pending_crypto, _progress=_progress)
+                    self.record_turn(prompt, exec_md, tickers=[pending_crypto["symbol"]])
+                    return exec_md
+                except Exception as exc:
+                    err_md = f"Error placing crypto order: {exc}"
+                    self.record_turn(prompt, err_md)
+                    return err_md
+            # User moved on to a different prompt -- clear stale pending order
+            self._pending_crypto_order = None
+
         if output_schema is None and _is_order_confirm_pending(self._history):
             if _CONFIRM_NO_RE.match(stripped):
                 msg = "Order cancelled. No order was placed."
@@ -426,6 +646,28 @@ class AgentHood(AgentuFacade):
             )
 
         prompt_tickers = extract_tickers(prompt, limit=5, context_ticker=self.last_ticker)
+        crypto_tickers = [t for t in prompt_tickers if is_crypto_symbol(t)]
+
+        # Step 1b2: Deterministic crypto order preview (Safety Rules 1, 2, 3, 4, 5)
+        # Triggers when the user asks to buy/sell a crypto asset ("buy $1 of DOGE",
+        # "buy BTC", or "just buy a crypto coin"). Always runs preview_crypto_order
+        # first and asks explicit confirmation -- NEVER places an order directly.
+        if (
+            output_schema is None
+            and _CRYPTO_ORDER_VERB_RE.search(stripped)
+            and not _DISCOVERY_INTENT_RE.search(stripped)
+            and (crypto_tickers or _CRYPTO_WORD_RE.search(stripped))
+        ):
+            try:
+                prev_md = await self._preview_crypto_order_intent(
+                    stripped, crypto_tickers, _progress=_progress
+                )
+                if prev_md:
+                    sym_used = (self._pending_crypto_order or {}).get("symbol") or (crypto_tickers[0] if crypto_tickers else "DOGE")
+                    self.record_turn(prompt, prev_md, tickers=[sym_used])
+                    return prev_md
+            except Exception as exc:
+                logger.debug("Crypto order preview fast-path failed: %s", exc)
 
         # Step 1c: Fast-path live market discovery ("best stock to buy", "trending stocks", "daily movers")
         # When the user asks a discovery question with no specific ticker named,
@@ -448,13 +690,14 @@ class AgentHood(AgentuFacade):
             try:
                 if _progress:
                     _progress(f"fetching {', '.join(prompt_tickers)} quote...")
-                raw_q = await self._call_tool_direct(
-                    "robinhood_get_equity_quotes", {"symbols": prompt_tickers}
-                )
+                all_crypto = all(is_crypto_symbol(t) for t in prompt_tickers)
+                q_tool = "robinhood_get_crypto_quotes" if all_crypto else "robinhood_get_equity_quotes"
+                q_syms = [f"{t}-USD" if all_crypto and not t.endswith("USD") else t for t in prompt_tickers]
+                raw_q = await self._call_tool_direct(q_tool, {"symbols": q_syms})
                 if isinstance(raw_q, dict) or (isinstance(raw_q, str) and raw_q.strip()[:1] in ("{", "[")):
                     import json as _j
                     raw_str = raw_q if isinstance(raw_q, str) else _j.dumps(raw_q)
-                    formatted_q = _format_tool_result("robinhood_get_equity_quotes", raw_str)
+                    formatted_q = _format_tool_result(q_tool, raw_str)
                     if formatted_q:
                         self.record_turn(prompt, formatted_q, tickers=prompt_tickers)
                         return formatted_q
@@ -526,15 +769,18 @@ class AgentHood(AgentuFacade):
                 except Exception as exc:
                     logger.debug("Direct portfolio/positions fallback failed: %s", exc)
 
-            # 2b. Direct fallback for stock quote lookups when LLM tool selection fails
+            # 2b. Direct fallback for stock/crypto quote lookups when LLM tool selection fails
             if not recovered and prompt_tickers:
                 try:
+                    all_crypto = all(is_crypto_symbol(t) for t in prompt_tickers)
+                    q_tool = "robinhood_get_crypto_quotes" if all_crypto else "robinhood_get_equity_quotes"
+                    q_syms = [f"{t}-USD" if all_crypto and not t.endswith("USD") else t for t in prompt_tickers]
                     raw = await self._call_tool_direct(
-                        "robinhood_get_equity_quotes",
-                        {"symbols": prompt_tickers}
+                        q_tool,
+                        {"symbols": q_syms}
                     )
                     ext = _extract_response(raw)
-                    formatted = _format_tool_result("robinhood_get_equity_quotes", ext)
+                    formatted = _format_tool_result(q_tool, ext)
 
                     if formatted:
                         extracted = formatted

@@ -118,7 +118,7 @@ class TokenManager:
     async def get_valid_token_async(self) -> str:
         """Return a valid access token, refreshing asynchronously if needed."""
         if not self._tokens:
-            return self.load()
+            self.load()
 
         access_token = self._tokens.get("access_token", "")
         if not access_token:
@@ -140,17 +140,19 @@ class TokenManager:
         if not new_tokens or "access_token" not in new_tokens:
             return access_token
 
-        self._tokens = new_tokens
+        self._tokens = {**self._tokens, **new_tokens}
         if self._token_file:
             try:
-                self._token_file.write_text(json.dumps(new_tokens, indent=2))
+                self._token_file.write_text(json.dumps(self._tokens, indent=2))
                 logger.info("✅ Token refreshed and saved to %s", self._token_file)
             except Exception as e:
                 logger.warning("Could not save refreshed token: %s", e)
-        return new_tokens["access_token"]
+        return self._tokens["access_token"]
 
     def _do_refresh(self) -> str:
         """Perform the refresh_token grant and persist new tokens."""
+        if not self._tokens:
+            self.load()
         refresh_tok = self._tokens.get("refresh_token", "")
         if not refresh_tok:
             logger.warning("No refresh_token available — cannot refresh")
@@ -165,19 +167,19 @@ class TokenManager:
             return ""
 
         # Persist to the same tokens.json so mcp-remote and agenthood stay in sync
-        self._tokens = new_tokens
+        self._tokens = {**self._tokens, **new_tokens}
         if self._token_file:
             try:
-                self._token_file.write_text(json.dumps(new_tokens, indent=2))
+                self._token_file.write_text(json.dumps(self._tokens, indent=2))
                 logger.info("✅ Token refreshed and saved to %s", self._token_file)
             except Exception as e:
                 logger.warning("Could not save refreshed token: %s", e)
-        return new_tokens["access_token"]
+        return self._tokens["access_token"]
 
     def get_valid_token(self) -> str:
         """Return a valid access token, refreshing synchronously if needed."""
         if not self._tokens:
-            return self.load()
+            self.load()
 
         access_token = self._tokens.get("access_token", "")
         if not access_token:

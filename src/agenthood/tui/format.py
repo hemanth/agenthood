@@ -71,9 +71,16 @@ def _format_mcp_response(raw: str, title: str) -> str:
 
         def _extract_q(entry):
             q = entry.get("quote", entry) if isinstance(entry, dict) else {}
-            sym = q.get("symbol", "?")
-            last_raw = q.get("last_trade_price")
-            prev_raw = q.get("adjusted_previous_close") or q.get("previous_close")
+            sym = str(q.get("symbol", "?"))
+            is_crypto = "mark_price" in q or (len(sym) > 3 and sym.endswith("USD") and not sym.endswith("-USD"))
+            if len(sym) > 3 and sym.endswith("USD") and not sym.endswith("-USD"):
+                sym = sym[:-3]
+            elif sym.endswith("-USD"):
+                sym = sym[:-4]
+                is_crypto = True
+
+            last_raw = q.get("last_trade_price") or q.get("mark_price")
+            prev_raw = q.get("adjusted_previous_close") or q.get("previous_close") or q.get("open_price")
             bid_raw = q.get("bid_price")
             ask_raw = q.get("ask_price")
             ext_raw = q.get("last_extended_hours_trade_price")
@@ -93,7 +100,8 @@ def _format_mcp_response(raw: str, title: str) -> str:
                 chg = cur - prev
                 pct = (chg / prev) * 100
                 sign = "+" if chg >= 0 else "-"
-                chg_str = f"{sign}${abs(chg):,.2f} ({'+' if chg >= 0 else ''}{pct:.2f}%)"
+                dec = 4 if 0 < abs(cur) < 1.0 else 2
+                chg_str = f"{sign}${abs(chg):,.{dec}f} ({'+' if chg >= 0 else ''}{pct:.2f}%)"
                 if pct > 1.5:
                     verdict = "BUY"
                 elif pct < -1.5:
@@ -103,12 +111,18 @@ def _format_mcp_response(raw: str, title: str) -> str:
                 if v is None:
                     return "-"
                 try:
-                    return f"${float(v):,.2f}"
+                    f = float(v)
+                    if 0 < abs(f) < 0.01:
+                        return f"${f:,.6f}"
+                    if 0 < abs(f) < 1.0:
+                        return f"${f:,.4f}"
+                    return f"${f:,.2f}"
                 except (ValueError, TypeError):
                     return str(v)
 
             return {
                 "symbol": sym,
+                "is_crypto": is_crypto,
                 "last": _fmt_p(last_raw),
                 "prev": _fmt_p(prev_raw),
                 "bid": _fmt_p(bid_raw),
@@ -122,6 +136,13 @@ def _format_mcp_response(raw: str, title: str) -> str:
         if not parsed_quotes:
             return f"## {title}\n\nNo data."
 
+        def _sym_link(pq: dict) -> str:
+            sym = pq["symbol"]
+            if sym == "?":
+                return sym
+            path = "crypto" if pq.get("is_crypto") else "stocks"
+            return f"[{sym}](https://robinhood.com/{path}/{sym})"
+
         # Multi-ticker side-by-side table
         if len(parsed_quotes) > 1:
             lines = [
@@ -130,8 +151,7 @@ def _format_mcp_response(raw: str, title: str) -> str:
                 "|---|---|---|---|---|---|---|",
             ]
             for idx, pq in enumerate(parsed_quotes, start=1):
-                sym = pq["symbol"]
-                link = f"[{sym}](https://robinhood.com/stocks/{sym})" if sym != "?" else sym
+                link = _sym_link(pq)
                 lines.append(
                     f"| {idx} | **{link}** | {pq['last']} | {pq['change']} | "
                     f"{pq['bid']} / {pq['ask']} | {pq['prev']} | **{pq['verdict']}** |"
@@ -141,8 +161,7 @@ def _format_mcp_response(raw: str, title: str) -> str:
 
         # Single-ticker detailed table
         pq = parsed_quotes[0]
-        sym = pq["symbol"]
-        link = f"[{sym}](https://robinhood.com/stocks/{sym})" if sym != "?" else sym
+        link = _sym_link(pq)
         lines = [
             f"## {title}",
             "| Metric | Value |",

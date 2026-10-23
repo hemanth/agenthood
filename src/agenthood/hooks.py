@@ -16,9 +16,26 @@ from agentu import HookResult, HookAction
 logger = logging.getLogger(__name__)
 
 # Tools that actually move money — matched by suffix (MCPToolAdapter prefixes with server name)
-_ORDER_SUFFIXES = {"place_equity_order", "place_option_order", "exercise_option"}
-_REVIEW_SUFFIXES = {"review_equity_order", "review_option_order"}
-_CANCEL_SUFFIXES = {"cancel_equity_order", "cancel_option_order", "cancel_option_exercise"}
+_ORDER_SUFFIXES = {
+    "place_equity_order",
+    "place_option_order",
+    "place_crypto_order",
+    "place_advanced_order",
+    "exercise_option",
+}
+_REVIEW_SUFFIXES = {
+    "review_equity_order",
+    "review_option_order",
+    "preview_crypto_order",
+    "review_advanced_order",
+}
+_CANCEL_SUFFIXES = {
+    "cancel_equity_order",
+    "cancel_option_order",
+    "cancel_crypto_order",
+    "cancel_advanced_order",
+    "cancel_option_exercise",
+}
 
 
 def _matches(tool_name: str, suffixes: set[str]) -> bool:
@@ -27,31 +44,49 @@ def _matches(tool_name: str, suffixes: set[str]) -> bool:
     return tool_name in suffixes or bare in suffixes
 
 
-def trading_guard(dry_run: bool, max_order_value: float, allowed_symbols: list[str]):
-    """Return a pre_tool hook closure configured with safety settings."""
+def _normalize_symbol(raw_sym: str) -> str:
+    sym = raw_sym.strip().upper()
+    if sym.endswith("-USD"):
+        return sym[:-4]
+    if len(sym) > 3 and sym.endswith("USD"):
+        return sym[:-3]
+    return sym
 
-    async def _hook(tool_name: str, params: dict[str, Any], context: Any) -> HookResult:
+
+def trading_guard(
+    dry_run: bool,
+    max_order_value: float,
+    allowed_symbols: list[str] | None = None,
+):
+    """Return a pre_tool hook closure configured with safety settings."""
+    allowed_list = allowed_symbols or []
+    allowed_norm = {_normalize_symbol(s) for s in allowed_list}
+
+    async def _hook(tool_name: str, params: dict[str, Any], context: Any = None) -> HookResult:
         # ── Dry-run: block real orders ─────────────────────────────────────
         if dry_run and _matches(tool_name, _ORDER_SUFFIXES):
             reason = (
                 f"🔒 DRY RUN — '{tool_name}' is blocked. "
-                "Use review_equity_order / review_option_order to simulate, "
-                "or set dry_run=False in agenthood.json to enable live trading."
+                "Use review_equity_order / preview_crypto_order / review_option_order to simulate, "
+                "or pass --live (or set dry_run=False in ~/.agenthood/config.json) to enable live trading."
             )
             logger.warning(reason)
             return HookResult(action=HookAction.DENY, reason=reason)
 
         # ── Symbol allowlist ───────────────────────────────────────────────
-        if allowed_symbols and _matches(tool_name, _ORDER_SUFFIXES | _REVIEW_SUFFIXES):
-            symbol = (
-                params.get("symbol") or
-                params.get("underlying_symbol") or
-                params.get("chain_symbol", "")
-            ).upper()
-            if symbol and symbol not in [s.upper() for s in allowed_symbols]:
+        if allowed_norm and _matches(tool_name, _ORDER_SUFFIXES | _REVIEW_SUFFIXES):
+            symbol = _normalize_symbol(
+                str(
+                    params.get("symbol") or
+                    params.get("underlying_symbol") or
+                    params.get("currency_code") or
+                    params.get("chain_symbol", "")
+                )
+            )
+            if symbol and symbol not in allowed_norm:
                 reason = (
                     f"⛔ Symbol '{symbol}' is not in the allowed list: "
-                    f"{', '.join(allowed_symbols)}"
+                    f"{', '.join(allowed_list)}"
                 )
                 logger.warning(reason)
                 return HookResult(action=HookAction.DENY, reason=reason)

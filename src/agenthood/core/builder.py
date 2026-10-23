@@ -99,16 +99,34 @@ async def _connect_mcp(cfg: Any) -> tuple[Any, list]:
     from agentu.mcp.transport import MCPServerConfig, TransportType, AuthConfig
     from agentu.mcp.tool import MCPToolAdapter
 
-    auth = AuthConfig.bearer_token(cfg.mcp_token) if cfg.mcp_token else None
-    mcp_config = MCPServerConfig(
-        name="robinhood",
-        transport_type=TransportType.STREAMABLE_HTTP,
-        url=cfg.mcp_url,
-        auth=auth,
-        timeout=30,
-    )
-    adapter = MCPToolAdapter(mcp_config)
-    tools = await adapter.load_tools()
+    def _make_adapter(token: str) -> MCPToolAdapter:
+        auth = AuthConfig.bearer_token(token) if token else None
+        mcp_config = MCPServerConfig(
+            name="robinhood",
+            transport_type=TransportType.STREAMABLE_HTTP,
+            url=cfg.mcp_url,
+            auth=auth,
+            timeout=30,
+        )
+        return MCPToolAdapter(mcp_config)
+
+    adapter = _make_adapter(cfg.mcp_token)
+    try:
+        tools = await adapter.load_tools()
+    except Exception as exc:
+        if "401" in str(exc) or getattr(exc, "status", None) == 401:
+            try:
+                await adapter.close()
+            except Exception:
+                pass
+            from ..token import TokenManager
+            refreshed = TokenManager()._do_refresh()
+            if refreshed:
+                cfg.mcp_token = refreshed
+                adapter = _make_adapter(refreshed)
+                tools = await adapter.load_tools()
+                return adapter, tools
+        raise
     return adapter, tools
 
 

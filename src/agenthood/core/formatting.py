@@ -16,16 +16,23 @@ def _format_tool_result(tool_name: str, raw_json: str) -> str | None:
         return None
 
     results = data.get("results") if isinstance(data, dict) else None
+    if results is None and isinstance(data, dict) and isinstance(data.get("data"), dict):
+        results = data["data"].get("results")
     if results is None and isinstance(data, list):
         results = data
     first = results[0] if (results and isinstance(results, list)) else {}
 
     def _price(v: str | None) -> str:
-        """Clean price: $58.53 not $58.530000."""
-        if not v:
+        """Clean price: $58.53 for stocks, $0.0786 for sub-$1 crypto."""
+        if v is None or v == "":
             return "-"
         try:
-            return f"${float(v):,.2f}"
+            f = float(v)
+            if 0 < abs(f) < 0.01:
+                return f"${f:,.6f}"
+            if 0 < abs(f) < 1.0:
+                return f"${f:,.4f}"
+            return f"${f:,.2f}"
         except (ValueError, TypeError):
             return str(v)
 
@@ -47,21 +54,23 @@ def _format_tool_result(tool_name: str, raw_json: str) -> str | None:
         except Exception:
             return str(ts)[:16]
 
-    # -- Quotes --
-    if "quote" in first:
+    # -- Equity & Crypto Quotes --
+    if isinstance(first, dict) and ("quote" in first or "mark_price" in first):
         parts = []
         for entry in results:
-            q = entry.get("quote", {})
-            sym = q.get("symbol", "?")
-            cur = float(q.get("last_trade_price", 0) or 0)
-            prev = float(q.get("adjusted_previous_close", 0) or 0)
+            q = entry.get("quote", entry) if isinstance(entry, dict) else {}
+            sym = str(q.get("symbol", "?"))
+            if len(sym) > 3 and sym.endswith("USD") and not sym.endswith("-USD"):
+                sym = sym[:-3]
+            cur = float(q.get("last_trade_price") or q.get("mark_price") or 0)
+            prev = float(q.get("adjusted_previous_close") or q.get("previous_close") or q.get("open_price") or 0)
             chg = cur - prev if prev else 0
             pct = (chg / prev * 100) if prev else 0
             sign = "+" if chg >= 0 else ""
             bid = q.get("bid_price")
             ask = q.get("ask_price")
-            state = q.get("state", "?")
-            trade_time = q.get("venue_last_trade_time")
+            state = q.get("state") or ("24/7 Market" if "mark_price" in q else "?")
+            trade_time = q.get("venue_last_trade_time") or q.get("updated_at")
 
             # Compute a preliminary signal / recommendation based on momentum
             if pct > 1.5:
@@ -72,7 +81,8 @@ def _format_tool_result(tool_name: str, raw_json: str) -> str | None:
                 signal_fmt = "[bold yellow]HOLD[/bold yellow]"
 
             chg_color = "green" if chg >= 0 else "red"
-            chg_fmt = f"[{chg_color}]{sign}{chg:.2f} ({sign}{pct:.2f}%)[/{chg_color}]"
+            chg_decimals = 4 if 0 < abs(cur) < 1.0 else 2
+            chg_fmt = f"[{chg_color}]{sign}{chg:.{chg_decimals}f} ({sign}{pct:.2f}%)[/{chg_color}]"
 
             lines = [
                 f"Ticker     : [bold cyan]{sym}[/bold cyan]",
@@ -81,13 +91,52 @@ def _format_tool_result(tool_name: str, raw_json: str) -> str | None:
                 f"Bid / Ask  : {_price(bid)} / {_price(ask)}",
                 f"Prev Close : {_price(str(prev))}",
                 f"Last Trade : {_time(trade_time)}",
-                f"Status     : {state.title()}",
+                f"Status     : {str(state).title()}",
             ]
             parts.append("\n".join(lines))
         return "\n\n".join(parts)
 
-    # -- Portfolio --
+    # -- Crypto Order Preview / Order --
     p_data = data.get("data", {}) if isinstance(data, dict) and "data" in data else data
+    if isinstance(p_data, dict) and isinstance(p_data.get("order"), dict):
+        ord_obj = p_data["order"]
+        ccy = ord_obj.get("currency_code") or ord_obj.get("symbol") or "?"
+        side = str(ord_obj.get("side") or "buy").upper()
+        otype_raw = str(ord_obj.get("type") or "limit").lower()
+        otype_map = {
+            "market": "Market Order",
+            "limit": "Limit Order",
+            "stop_loss": "Stop Order",
+            "stop_limit": "Stop Limit Order",
+        }
+        otype = otype_map.get(otype_raw, otype_raw.title())
+        qty = ord_obj.get("quantity") or "-"
+        px = _price(ord_obj.get("price") or ord_obj.get("limit_price"))
+        tif = str(ord_obj.get("time_in_force") or "gtc").upper()
+        fee = _price(p_data.get("estimated_fee", "0"))
+        total = _price(ord_obj.get("net_rounded_estimated_notional") or ord_obj.get("entered_price"))
+        routing = ord_obj.get("routing") or "-"
+        acct = p_data.get("crypto_account_number") or "-"
+        state = ord_obj.get("state") or "preview"
+        lines = [
+            f"### Crypto Order ({state.upper()})",
+            "| Field | Value |",
+            "|---|---|",
+            f"| Side | **{side}** |",
+            f"| Asset | **{ccy} ({ccy}-USD)** |",
+            f"| Order Type | {otype} |",
+            f"| Quantity | {qty} {ccy} |",
+            f"| Unit / Limit Price | {px} |",
+            f"| Time in Force | {tif} |",
+            f"| Estimated Fee | {fee} |",
+            f"| Estimated Total | **{total}** |",
+            f"| Routing | {routing} |",
+        ]
+        if acct and acct != "-":
+            lines.append(f"| Crypto Account | {acct} |")
+        if ord_obj.get("id") and "preview" not in tool_name:
+            lines.append(f"| Order ID | `{ord_obj['id']}` |")
+        return "\n".join(lines)
     if isinstance(p_data, dict) and "total_value" in p_data:
         val = _price(p_data.get("total_value"))
         eq = _price(p_data.get("equity_value"))

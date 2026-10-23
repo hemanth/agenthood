@@ -86,9 +86,27 @@ async def run_quote(agent, ticker_spec: str) -> None:
     async with ThinkingDisplay(console) as td:
         td.step(f"fetching {label} quote...")
         try:
-            raw = await agent._call_tool_direct(
-                "robinhood_get_equity_quotes", {"symbols": tickers}
-            )
+            from ..core.tickers import is_crypto_symbol
+            all_crypto = bool(tickers) and all(is_crypto_symbol(t) for t in tickers)
+            if all_crypto:
+                pairs = [t if t.endswith("USD") else f"{t}-USD" for t in tickers]
+                raw = await agent._call_tool_direct(
+                    "robinhood_get_crypto_quotes", {"symbols": pairs}
+                )
+            else:
+                raw = await agent._call_tool_direct(
+                    "robinhood_get_equity_quotes", {"symbols": tickers}
+                )
+                try:
+                    parsed = json.loads(raw) if isinstance(raw, str) else raw
+                    res_list = ((parsed.get("data") or parsed).get("results") if isinstance(parsed, dict) else None)
+                    if res_list == []:
+                        pairs = [t if t.endswith("USD") else f"{t}-USD" for t in tickers]
+                        raw = await agent._call_tool_direct(
+                            "robinhood_get_crypto_quotes", {"symbols": pairs}
+                        )
+                except Exception:
+                    pass
             response = _format_mcp_response(raw, f"{label} Quote")
             td.step("done")
         except Exception as exc:
